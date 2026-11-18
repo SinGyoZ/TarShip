@@ -1,0 +1,21 @@
+# TarShip Hub 部署（方案 11.1）
+#
+# 使用方式：
+#   本地构建部署（未发布镜像前的唯一正确方式）：docker compose up -d --build
+#   镜像已发布到 Docker Hub 后：docker compose up -d
+#
+# 注意：singyoku/tarship 仓库名与旧版系统共用。若 Docker Hub 上存在旧版 latest
+# 镜像，`up` 不带 --build 会拉到旧版——务必按上方说明选择正确命令。
+services:
+  tarship:
+    image: singyoku/tarship:latest
+    build: .
+    command: hub
+    ports:
+      - "8080:8080"
+    volumes:
+      # SQLite + JWT 密钥全在此卷，务必对 /data 自身做好备份（可用 TarShip 自身备份此目录所在宿主路径）
+      - tarship-hub-data:/data
+    restart: unless-stopped
+volumes:
+  tarship-hub-data:
