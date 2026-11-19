@@ -162,11 +162,12 @@ func TestIsOutdated(t *testing.T) {
 func TestInstallCommand(t *testing.T) {
 	cmd := installCommand("https://hub.example.com:8080", "tsk_abc", "amd64")
 	// 安装命令必须包含关键元素：下载、systemd 单元、server 与 token 参数；
+	// 下载必须落 /tmp 再 mv（运行中的二进制不可直接覆盖，ETXTBSY）；
 	// 结尾必须是 daemon-reload + enable + restart，保证升级重装时新二进制生效
 	for _, want := range []string{
 		"tarship-linux-amd64", "--server https://hub.example.com:8080",
-		"--token tsk_abc", "systemctl daemon-reload",
-		"systemctl enable tarship-agent", "systemctl restart tarship-agent",
+		"--token tsk_abc", "-o /tmp/tarship.new", "mv /tmp/tarship.new /usr/local/bin/tarship",
+		"systemctl daemon-reload", "systemctl enable tarship-agent", "systemctl restart tarship-agent",
 	} {
 		if !contains(cmd, want) {
 			t.Fatalf("安装命令缺少 %q:\n%s", want, cmd)

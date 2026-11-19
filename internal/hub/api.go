@@ -308,11 +308,15 @@ func isOutdated(agentVersion, hubVersion string) bool {
 }
 
 // installCommand 按方案 11.2 生成 Agent 一键安装命令（systemd 裸机部署）。
-// 结尾三步同时兼容全新安装与升级重装：enable --now 对已运行服务不会重启，
-// 升级场景必须 daemon-reload + restart 才能让新二进制生效。
+// 三处细节缺一不可：
+//  1. 先下载到 /tmp 再 mv——直接 -o 覆盖正在运行的二进制会触发 ETXTBSY 写入保护，
+//     rename 原子替换目录项则不受影响（升级重装场景 Agent 仍在运行）；
+//  2. 结尾 daemon-reload + restart——enable --now 对已运行服务不会重启；
+//  3. enable 保持幂等，全新安装与升级重装同一份命令。
 func installCommand(hubURL, token, arch string) string {
-	const tmpl = `curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/tarship-linux-%s -o /usr/local/bin/tarship
-chmod +x /usr/local/bin/tarship
+	const tmpl = `curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/tarship-linux-%s -o /tmp/tarship.new
+chmod +x /tmp/tarship.new
+mv /tmp/tarship.new /usr/local/bin/tarship
 cat > /etc/systemd/system/tarship-agent.service <<'EOF'
 [Unit]
 Description=TarShip Agent

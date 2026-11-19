@@ -94,8 +94,9 @@ docker compose up -d --build
 3. 在目标服务器上以 root 执行安装命令：
 
 ```bash
-curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/tarship-linux-amd64 -o /usr/local/bin/tarship
-chmod +x /usr/local/bin/tarship
+curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/tarship-linux-amd64 -o /tmp/tarship.new
+chmod +x /tmp/tarship.new
+mv /tmp/tarship.new /usr/local/bin/tarship
 cat > /etc/systemd/system/tarship-agent.service <<'EOF'
 [Unit]
 Description=TarShip Agent
@@ -291,6 +292,12 @@ TarShip/
 可以：Hub 用 `--addr :9090`（compose 里改 ports 映射），Agent 连接地址相应变更。
 
 ## 更新记录
+
+### v0.1.4 · 安装命令覆盖修复（2026-11-19）
+
+**修复**
+
+- 安装命令改为先下载 /tmp 再 mv 原子替换：直接 `-o` 覆盖正在运行的 Agent 二进制会触发 ETXTBSY 写入保护（表现为 `curl: (23) client returned ERROR on write`），升级重装场景必然失败
 
 ### v0.1.3 · 安装命令升级兼容（2026-11-19）
 
