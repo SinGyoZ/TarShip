@@ -1,5 +1,5 @@
 # 自动构建 Docker 镜像并推送 Docker Hub（单仓库 singyoku/tarship，方案 11.3）。
-# 触发：push 到 main（产出 latest + sha 标签）；推送 v* tag（追加版本标签）。
+# 触发：push 到 main（产出 edge + sha 标签）；推送 v* tag（产出 latest + 版本标签）。
 # 所需 Secrets：DOCKERHUB_USERNAME / DOCKERHUB_TOKEN（hub.docker.com → Account Settings → Security 生成）。
 # M0 阶段仅构建 linux/amd64；arm64 待 M4 发版流水线（goreleaser + 多平台 manifest）再扩展。
 name: Docker
@@ -27,9 +27,11 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: singyoku/tarship
-          # main 推送 → latest + 短 SHA（可追溯）；v* tag → 追加版本号
+          # latest 永远指向最新稳定 Release（tag 构建）；
+          # main 分支构建打 edge 标签（开发版），避免用户误拉未发布代码
           tags: |
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,prefix=sha-
             type=ref,event=tag
 

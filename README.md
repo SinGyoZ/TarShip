@@ -160,7 +160,7 @@ volumes:
 ```
 
 - 数据目录 `/data`（SQLite + JWT 密钥）全部在卷内，**请务必对它做备份**（例如用 TarShip 自身把宿主机的卷目录纳入某台机器的备份任务）。
-- 镜像由 CI 自动构建推送 Docker Hub：`docker compose up -d` 直接拉取 `latest`；升级执行 `docker compose pull && docker compose up -d`。
+- 镜像由 CI 自动构建推送 Docker Hub：`latest` 始终指向最新稳定 Release（tag 构建），`edge` 跟随 main 开发版；升级执行 `docker compose pull && docker compose up -d`。
 - 本地源码构建部署：`docker compose up -d --build`。
 
 ### Hub · 裸机运行
@@ -269,7 +269,7 @@ TarShip/
 ## 常见问题
 
 **Q：怀疑面板跑的不是最新版？**
-镜像由 CI 自动构建，`latest` 始终对应 main 分支最新提交。升级：`docker compose pull && docker compose up -d`；确认容器内版本可执行 `docker compose exec tarship /tarship version`（main 分支构建显示 `dev`，v* tag 构建显示对应版本号）。
+镜像由 CI 自动构建：`latest` = 最新稳定 Release，`edge` = main 开发版。升级：`docker compose pull && docker compose up -d`；确认容器内版本可执行 `docker compose exec tarship /tarship version`（应显示版本号，如 `v0.1.2`）。仪表盘的「版本落后」按语义化版本比较，Agent 版本低于 Hub 才计入；开发版（dev）不参与比较。
 
 **Q：Token 忘了保存怎么办？**
 无法找回明文（库里只存 SHA-256）。在服务器列表点「重置 Token」生成新的，旧 Agent 自动失联，用新 Token 重新部署。
@@ -289,6 +289,16 @@ TarShip/
 可以：Hub 用 `--addr :9090`（compose 里改 ports 映射），Agent 连接地址相应变更。
 
 ## 更新记录
+
+### v0.1.2 · 版本比较修正（2026-11-19）
+
+**修复**
+
+- 仪表盘「版本落后」改用语义化版本比较：Agent 版本低于 Hub 才计入；任一方为非 semver（如 dev 开发版）不计入，消除「装了最新版却提示落后」的误报
+
+**变更**
+
+- 镜像标签策略：`latest` 始终指向最新稳定 Release（tag 构建），main 分支构建改打 `edge` 标签
 
 ### v0.1.1 · 弹窗修复与 CI（2026-11-19）
 

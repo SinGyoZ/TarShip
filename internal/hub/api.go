@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/mod/semver"
+
 	"github.com/SinGyoZ/TarShip/internal/version"
 )
 
@@ -278,8 +280,7 @@ func (a *api) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	for _, s := range servers {
 		if info, ok := online[s.ID]; ok {
 			onlineCount++
-			// M0 以字符串相等判断版本一致；语义化比较在 M1 细化
-			if info.AgentVersion != version.Version {
+			if isOutdated(info.AgentVersion, version.Version) {
 				outdated++
 			}
 		}
@@ -296,6 +297,15 @@ func (a *api) handleDashboard(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- 工具函数 ----
+
+// isOutdated 用语义化版本比较判断 Agent 是否落后于 Hub。
+// 任一方非 semver（如 dev / 本地构建号）时不计入，避免字符串不等导致误报。
+func isOutdated(agentVersion, hubVersion string) bool {
+	if !semver.IsValid(agentVersion) || !semver.IsValid(hubVersion) {
+		return false
+	}
+	return semver.Compare(agentVersion, hubVersion) < 0
+}
 
 // installCommand 按方案 11.2 生成 Agent 一键安装命令（systemd 裸机部署）。
 func installCommand(hubURL, token, arch string) string {
