@@ -78,12 +78,12 @@ TarShip 是一艘运输 tar 包的船：Agent 在源服务器上打包、压缩�
 git clone https://github.com/SinGyoZ/TarShip.git
 cd TarShip
 
-# 从源码本地构建并启动（当前阶段的正确方式）
+# 直接拉取 Docker Hub 镜像启动（CI 自动构建，随时最新）
+docker compose up -d
+
+# 或从源码构建（修改过代码 / 需要本地定制时）
 docker compose up -d --build
 ```
-
-> [!WARNING]
-> `singyoku/tarship` 镜像名与本项目的历史旧版共用。**`docker compose up` 不带 `--build` 会优先使用已存在的同名镜像**（包括 Docker Hub 上的旧版）。在官方发布新镜像之前，请始终带上 `--build`。
 
 启动后浏览器访问 `http://<服务器IP>:8080`，首次进入会引导你创建管理员账号。
 
@@ -160,7 +160,8 @@ volumes:
 ```
 
 - 数据目录 `/data`（SQLite + JWT 密钥）全部在卷内，**请务必对它做备份**（例如用 TarShip 自身把宿主机的卷目录纳入某台机器的备份任务）。
-- 未发布官方镜像前：`docker compose up -d --build`。
+- 镜像由 CI 自动构建推送 Docker Hub：`docker compose up -d` 直接拉取 `latest`；升级执行 `docker compose pull && docker compose up -d`。
+- 本地源码构建部署：`docker compose up -d --build`。
 
 ### Hub · 裸机运行
 
@@ -267,8 +268,8 @@ TarShip/
 
 ## 常见问题
 
-**Q：`docker compose up` 起来的界面不对/版本不对？**
-镜像名与历史旧版共用。本地部署必须 `docker compose up -d --build`；确认容器内版本可执行 `docker compose exec tarship /tarship version`。
+**Q：怀疑面板跑的不是最新版？**
+镜像由 CI 自动构建，`latest` 始终对应 main 分支最新提交。升级：`docker compose pull && docker compose up -d`；确认容器内版本可执行 `docker compose exec tarship /tarship version`（main 分支构建显示 `dev`，v* tag 构建显示对应版本号）。
 
 **Q：Token 忘了保存怎么办？**
 无法找回明文（库里只存 SHA-256）。在服务器列表点「重置 Token」生成新的，旧 Agent 自动失联，用新 Token 重新部署。
@@ -288,6 +289,17 @@ TarShip/
 可以：Hub 用 `--addr :9090`（compose 里改 ports 映射），Agent 连接地址相应变更。
 
 ## 更新记录
+
+### v0.1.1 · 弹窗修复与 CI（2026-11-19）
+
+**修复**
+
+- 修正 Tailwind content 扫描路径：HeroUI v2.8 的组件类名分散在嵌套子包的 `.mjs` chunk 中，原配置扫描的 `@heroui/theme` 路径已不存在，导致 Modal 遮罩层 `fixed/inset-0/z-50` 等 utility 类未生成 CSS、弹窗被排到视口外不可见（表现为点击「添加服务器」无反应）
+
+**新增**
+
+- GitHub Actions CI 质量门禁：前端构建 + go vet + 单测
+- GitHub Actions Docker 自动构建：push main 产出 `latest` + `sha-*` 标签，v* tag 追加版本标签；`docker compose up -d` 可直接拉取最新镜像
 
 ### v0.1.0 · M0 骨架（2026-11-18）
 
