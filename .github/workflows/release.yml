@@ -1,0 +1,55 @@
+# 发版流水线：tag v* 触发 → 双架构静态二进制 + 校验和 → 自动创建 Release 上传资产。
+# 面板"添加服务器"生成的安装命令引用 releases/latest/download/tarship-linux-{arch}，
+# 资产名必须严格一致。同时 docker.yml 会为同一 tag 产出带版本号的镜像标签。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 构建前端面板（go:embed 依赖）
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: 交叉编译 linux amd64 / arm64 静态二进制
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p dist
+          for ARCH in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="${ARCH}" go build -trimpath \
+              -ldflags "-s -w -X github.com/SinGyoZ/TarShip/internal/version.Version=${VERSION}" \
+              -o "dist/tarship-linux-${ARCH}" ./cmd/tarship
+          done
+          sha256sum dist/tarship-linux-* > dist/checksums.txt
+          ls -lh dist/
+
+      - name: 创建 Release 并上传资产
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/tarship-linux-amd64
+            dist/tarship-linux-arm64
+            dist/checksums.txt
+          generate_release_notes: true
