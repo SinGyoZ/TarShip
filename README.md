@@ -300,6 +300,7 @@ TarShip/
 
 - GitHub Actions CI 质量门禁：前端构建 + go vet + 单测
 - GitHub Actions Docker 自动构建：push main 产出 `latest` + `sha-*` 标签，v* tag 追加版本标签；`docker compose up -d` 可直接拉取最新镜像
+- 发版流水线：tag v* 自动产出 linux amd64/arm64 静态二进制与 sha256 校验和并发布 GitHub Release，面板「添加服务器」生成的安装命令自此可直接下载
 
 ### v0.1.0 · M0 骨架（2026-11-18）
 
