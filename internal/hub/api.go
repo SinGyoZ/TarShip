@@ -308,6 +308,8 @@ func isOutdated(agentVersion, hubVersion string) bool {
 }
 
 // installCommand 按方案 11.2 生成 Agent 一键安装命令（systemd 裸机部署）。
+// 结尾三步同时兼容全新安装与升级重装：enable --now 对已运行服务不会重启，
+// 升级场景必须 daemon-reload + restart 才能让新二进制生效。
 func installCommand(hubURL, token, arch string) string {
 	const tmpl = `curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/tarship-linux-%s -o /usr/local/bin/tarship
 chmod +x /usr/local/bin/tarship
@@ -321,7 +323,9 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl enable --now tarship-agent`
+systemctl daemon-reload
+systemctl enable tarship-agent
+systemctl restart tarship-agent`
 	return fmt.Sprintf(tmpl, arch, hubURL, token)
 }
 

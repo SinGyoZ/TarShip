@@ -106,7 +106,9 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl enable --now tarship-agent
+systemctl daemon-reload
+systemctl enable tarship-agent
+systemctl restart tarship-agent
 ```
 
 4. 回到面板，几秒内该服务器亮起「在线」状态
@@ -289,6 +291,12 @@ TarShip/
 可以：Hub 用 `--addr :9090`（compose 里改 ports 映射），Agent 连接地址相应变更。
 
 ## 更新记录
+
+### v0.1.3 · 安装命令升级兼容（2026-11-19）
+
+**修复**
+
+- 面板生成的一键安装命令结尾改为 daemon-reload + enable + restart：原 `enable --now` 对已运行服务不会重启，升级重装时新二进制不生效
 
 ### v0.1.2 · 版本比较修正（2026-11-19）
 
