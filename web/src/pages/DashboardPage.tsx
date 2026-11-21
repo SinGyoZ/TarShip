@@ -1,4 +1,4 @@
-import { Button, Spinner } from "@heroui/react";
+import { Button, Chip, Spinner } from "@heroui/react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api, errorMessage } from "../api";
@@ -6,6 +6,7 @@ import { PageHeader } from "../components/PageHeader";
 import { StatusDot } from "../components/StatusDot";
 import { useNow } from "../hooks/useNow";
 import { relativeTime } from "../lib/format";
+import type { Run } from "../types";
 
 function StatCard({ label, value, tone }: { label: string; value: number; tone?: "ok" | "warn" | "danger" }) {
   const toneClass =
@@ -21,6 +22,7 @@ function StatCard({ label, value, tone }: { label: string; value: number; tone?:
 export default function DashboardPage() {
   const servers = useQuery({ queryKey: ["servers"], queryFn: api.listServers });
   const stats = useQuery({ queryKey: ["dashboard"], queryFn: api.dashboard });
+  const runs = useQuery({ queryKey: ["runs"], queryFn: api.listRuns });
   const now = useNow(30_000);
 
   if (servers.isPending) {
@@ -101,7 +103,50 @@ export default function DashboardPage() {
       ) : (
         <p className="mt-6 text-sm">所有服务器都在线。</p>
       )}
-      <p className="mt-8 text-sm text-muted">备份任务、备份库与存储器尚未开放，当前版本只提供服务器接入与在线状态。</p>
+
+      <section aria-labelledby="recent-runs-heading" className="mt-8">
+        <div className="mb-2 flex items-center justify-between">
+          <h2 id="recent-runs-heading" className="text-base font-semibold">
+            最近备份
+          </h2>
+          <Link to="/tasks" className="text-sm text-accent hover:underline">
+            去任务页
+          </Link>
+        </div>
+        {runs.isError ? (
+          <p role="alert" className="text-sm text-danger">
+            {errorMessage(runs.error)}
+          </p>
+        ) : (runs.data ?? []).length === 0 ? (
+          <p className="text-sm text-muted">还没有备份记录，到「任务」页新建任务并触发第一次备份。</p>
+        ) : (
+          <ul className="divide-y divide-border rounded-xl border border-border bg-surface">
+            {(runs.data ?? []).slice(0, 5).map((rn: Run) => (
+              <li key={rn.id} className="flex flex-wrap items-center justify-between gap-2 px-4 py-3 text-sm">
+                <span className="flex items-center gap-2">
+                  {rn.status === "success" ? (
+                    <Chip size="sm" variant="soft" className="text-success">
+                      成功
+                    </Chip>
+                  ) : rn.status === "running" ? (
+                    <Chip size="sm" variant="soft">
+                      运行中
+                    </Chip>
+                  ) : (
+                    <Chip size="sm" variant="soft" className="text-danger">
+                      失败
+                    </Chip>
+                  )}
+                  <span>{`任务 #${rn.task_id}`}</span>
+                </span>
+                <span className="text-xs text-muted" title={rn.error_msg ?? ""}>
+                  {relativeTime(rn.started_at, now)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
     </>
   );
 }

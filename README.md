@@ -27,23 +27,28 @@ TarShip 是一艘运输 tar 包的船：Agent 在源服务器上打包、压缩�
 - **凭据最小化** —— Agent token 明文仅展示一次，库中只存 SHA-256；泄露可随时重置令旧 Agent 立即失联。
 - **断线自愈** —— Agent 掉线按指数退避自动重连，Hub 重启后全部 Agent 自动回归在线。
 
-### 当前版本（M0）已交付
+### 当前版本（M1）已交付
 
 | 能力 | 说明 |
 | --- | --- |
-| 面板认证 | 首启初始化向导、bcrypt 密码哈希、JWT HttpOnly Cookie（24h） |
+| 面板认证 | 首启一次性 setup token 初始化、bcrypt 密码哈希、JWT HttpOnly Cookie（24h）、登录限速 |
 | 服务器管理 | 添加（生成 token + 一键安装命令）、删除、token 重置 |
 | 实时状态 | WebSocket 事件驱动，上/下线秒级反映到面板 |
-| 仪表盘 | 服务器总数、在线/离线、Agent 版本落后统计 |
-| Agent | 长连接、hello/heartbeat、指数退避重连、hostname 上报 |
+| 存储器 | local 目录与 S3 兼容端点（MinIO/R2/B2），连通性测试（S3 由 Hub 验证，local 由 Agent 实测可写） |
+| 备份任务 | 多目录、doublestar 排除规则（支持 `**`）、绑定服务器与存储器 |
+| 手动备份 | Agent 端 tar 流式打包 → zstd 压缩 → **直传存储器**（S3 流式 multipart，数据不落 Agent 本地） |
+| 完整性校验 | 产物 sha256 全程流式计算，与面板登记值可比对 |
+| 实时进度 | 运行状态经 WebSocket 推送，任务页/仪表盘实时可见 |
+| 备份库 | 产物登记（对象键、大小、sha256）与完整运行历史，产物为标准 `.tar.zst` 可手工恢复 |
+| 健壮性 | Agent 断线/Hub 重启时未完成运行自动标记失败，同任务并发防护 |
 
 ### 路线图
 
 | 里程碑 | 交付内容 | 状态 |
-| --- | --- | --- |
-| M0 骨架 | 双角色入口、注册/心跳/在线判定、JWT 登录、面板骨架 | ✅ 当前版本 |
-| M1 备份闭环（MVP） | 存储管理（S3 + 本地）、任务 CRUD、手动备份、tar+zstd 流式直传、实时进度、sha256 校验 | 🔜 |
-| M2 调度自动化 | cron 调度、错过补跑、失败重试、webhook 通知、保留策略与回收站 | ⏳ |
+| --- | --- |
+| M0 骨架 | 双角色入口、注册/心跳/在线判定、JWT 登录、面板骨架 | ✅ |
+| M1 备份闭环（MVP） | 存储管理（S3 + 本地）、任务 CRUD、手动备份、tar+zstd 流式直传、实时进度、sha256 校验 | ✅ 当前版本 |
+| M2 调度自动化 | cron 调度、错过补跑、失败重试、webhook 通知、保留策略与回收站 | 🔜 |
 | M3 恢复闭环 | 一键恢复（原位/另存）、恢复前快照、一键回滚、解包安全规则 | ⏳ |
 | M4 加密与发版 | 任务级 age 加密、私钥导出、reindex 灾难恢复、CI 全流程、v1.0.0 | ⏳ |
 
@@ -221,9 +226,15 @@ services:
       TARSHIP_SERVER: wss://hub.example.com:8080
       TARSHIP_TOKEN: <TOKEN>
     volumes:
-      - /var/www:/var/www:ro   # 按需挂载要备份的目录（M1 起生效）
+      - /var/www:/var/www:ro          # 被备份的目录：容器内路径与任务 paths 保持一致
+      # 使用 local 存储器时，必须把存储目录也挂进来（路径与存储器 root_dir 一致），
+      # 否则产物会写进容器内部，容器删除即丢失：
+      # - /srv/tarship-backups:/srv/tarship-backups
     restart: unless-stopped
 ```
+
+> [!WARNING]
+> **local 存储器 + 容器化 Agent 的关键约定**：`root_dir` 是 Agent 视角路径。容器化 Agent 必须把宿主机存储目录以同一路径挂载进容器，否则备份会"成功"写入容器可写层，容器删除即丢失（推荐容器场景直接用 S3 存储器规避）。
 
 ### TLS 与反向代理
 
@@ -316,6 +327,13 @@ TarShip/
 ## 更新记录
 
 完整历史见 [CHANGELOG.md](./CHANGELOG.md)。
+
+### v0.3.0 · M1 备份闭环（2026-11-21）
+
+- 存储器管理（local + S3 兼容，连通性测试，secret 不回显）
+- 备份任务（多目录、`**` 排除规则）与手动备份闭环：tar 流式打包 → zstd → **Agent 直传存储器**（S3 流式 multipart），sha256 全程校验
+- 实时进度与运行徽章；备份库（产物登记 + 运行历史）
+- Agent 断线 / Hub 重启时未完成运行自动清场；同任务并发防护
 
 ### v0.2.1 · 文档与细节修正（2026-11-21）
 

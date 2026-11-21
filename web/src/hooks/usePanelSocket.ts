@@ -44,6 +44,18 @@ export function usePanelSocket(): SocketState {
           void qc.invalidateQueries({ queryKey: ["servers"] });
           void qc.invalidateQueries({ queryKey: ["dashboard"] });
           break;
+        case "run_update":
+        case "runs_changed":
+          // 备份进度与结果：失效运行历史与产物登记
+          void qc.invalidateQueries({ queryKey: ["runs"] });
+          void qc.invalidateQueries({ queryKey: ["backups"] });
+          void qc.invalidateQueries({ queryKey: ["dashboard"] });
+          break;
+        case "tasks_changed":
+          void qc.invalidateQueries({ queryKey: ["tasks"] });
+          void qc.invalidateQueries({ queryKey: ["runs"] });
+          void qc.invalidateQueries({ queryKey: ["backups"] });
+          break;
       }
     };
 

@@ -1,11 +1,18 @@
 package hub
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
+
+	"github.com/SinGyoZ/TarShip/internal/proto"
 )
+
+var errAgentOffline = errors.New("Agent 离线")
 
 // agentSession 是一条已通过 hello 的 Agent 连接。
 type agentSession struct {
@@ -15,6 +22,19 @@ type agentSession struct {
 	version   string
 	lastSeen  time.Time // 由 presence.mu 保护
 	lastFlush time.Time // 仅所属 handler 的 goroutine 访问
+
+	// sendMu 保护连接写：心跳应答与 REST 线程下发的备份指令来自不同 goroutine，
+	// coder/websocket 同一时刻只允许一个写者
+	sendMu sync.Mutex
+}
+
+// send 串行写消息给该 Agent。
+func (s *agentSession) send(ctx context.Context, v any) error {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	wctx, cancel := context.WithTimeout(ctx, proto.WriteTimeout)
+	defer cancel()
+	return wsjson.Write(wctx, s.conn, v)
 }
 
 // presence 在内存里维护在线状态：在线与否以它为准，数据库只在节流后记录 last_seen_at。
@@ -73,6 +93,25 @@ func (p *presence) agentVersion(id int64) string {
 		return s.version
 	}
 	return ""
+}
+
+// session 返回在线会话；离线时 ok=false。
+func (p *presence) session(id int64) (*agentSession, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	s, ok := p.sessions[id]
+	return s, ok
+}
+
+// sendToServer 向指定服务器的在线连接发送指令；离线时返回 errAgentOffline。
+func (p *presence) sendToServer(ctx context.Context, serverID int64, v any) error {
+	p.mu.RLock()
+	s := p.sessions[serverID]
+	p.mu.RUnlock()
+	if s == nil {
+		return errAgentOffline
+	}
+	return s.send(ctx, v)
 }
 
 // kick 关闭某台服务器当前的连接（服务器被删除、token 被重置时使用）。

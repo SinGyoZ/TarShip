@@ -1,4 +1,14 @@
-import type { DashboardStats, Server, ServerWithToken } from "./types";
+import type {
+  Backup,
+  DashboardStats,
+  Run,
+  Server,
+  ServerWithToken,
+  Storage,
+  StorageInput,
+  Task,
+  TaskInput,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -54,6 +64,22 @@ export const api = {
   createServer: (name: string) => request<ServerWithToken>("POST", "/api/servers", { name }),
   deleteServer: (id: number) => request<void>("DELETE", `/api/servers/${id}`),
   resetToken: (id: number) => request<ServerWithToken>("POST", `/api/servers/${id}/reset-token`),
+
+  // ---- M1 备份闭环 ----
+  listStorages: () => request<Storage[]>("GET", "/api/storages"),
+  createStorage: (body: StorageInput) => request<Storage>("POST", "/api/storages", body),
+  updateStorage: (id: number, body: StorageInput) =>
+    request<Storage>("PUT", `/api/storages/${id}`, body),
+  deleteStorage: (id: number) => request<void>("DELETE", `/api/storages/${id}`),
+  testStorage: (id: number, serverID?: number) =>
+    request<{ ok: boolean; message: string }>("POST", `/api/storages/${id}/test`, serverID ? { server_id: serverID } : {}),
+  listTasks: () => request<Task[]>("GET", "/api/tasks"),
+  createTask: (body: TaskInput) => request<Task>("POST", "/api/tasks", body),
+  updateTask: (id: number, body: TaskInput) => request<Task>("PUT", `/api/tasks/${id}`, body),
+  deleteTask: (id: number) => request<void>("DELETE", `/api/tasks/${id}`),
+  runTask: (id: number) => request<Run>("POST", `/api/tasks/${id}/run`),
+  listRuns: () => request<Run[]>("GET", "/api/runs"),
+  listBackups: () => request<Backup[]>("GET", "/api/backups"),
 };
 
 export function errorMessage(e: unknown): string {

@@ -32,6 +32,11 @@ type Hub struct {
 	presence *presence
 	panel    *panelBroker
 	wg       sync.WaitGroup // 跟踪 WebSocket handler，退出时等它们收尾
+
+	// pendingTests 承接 local 存储器可写性测试的异步回报（testID → chan）
+	pendingTests sync.Map
+	// runProgress 缓存 Agent 上报的实时进度（runID → 已上传字节），不落库
+	runProgress sync.Map
 }
 
 // New 组装 Hub，不监听端口。
@@ -67,6 +72,8 @@ func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
+	// 上一次进程退出可能遗留 running 状态的运行，先清场再对外服务
+	h.failStaleRuns()
 	log.Info("Hub 已启动", "addr", cfg.Addr, "data", cfg.DataDir, "version", version.Version)
 
 	select {
@@ -99,6 +106,20 @@ func (h *Hub) Handler() http.Handler {
 	mux.Handle("DELETE /api/servers/{id}", h.auth.require(http.HandlerFunc(h.handleDeleteServer)))
 	mux.Handle("POST /api/servers/{id}/reset-token", h.auth.require(http.HandlerFunc(h.handleResetToken)))
 	mux.Handle("GET /api/dashboard", h.auth.require(http.HandlerFunc(h.handleDashboard)))
+
+	// M1 备份闭环
+	mux.Handle("GET /api/storages", h.auth.require(http.HandlerFunc(h.handleListStorages)))
+	mux.Handle("POST /api/storages", h.auth.require(http.HandlerFunc(h.handleCreateStorage)))
+	mux.Handle("PUT /api/storages/{id}", h.auth.require(http.HandlerFunc(h.handleUpdateStorage)))
+	mux.Handle("DELETE /api/storages/{id}", h.auth.require(http.HandlerFunc(h.handleDeleteStorage)))
+	mux.Handle("POST /api/storages/{id}/test", h.auth.require(http.HandlerFunc(h.handleTestStorage)))
+	mux.Handle("GET /api/tasks", h.auth.require(http.HandlerFunc(h.handleListTasks)))
+	mux.Handle("POST /api/tasks", h.auth.require(http.HandlerFunc(h.handleCreateTask)))
+	mux.Handle("PUT /api/tasks/{id}", h.auth.require(http.HandlerFunc(h.handleUpdateTask)))
+	mux.Handle("DELETE /api/tasks/{id}", h.auth.require(http.HandlerFunc(h.handleDeleteTask)))
+	mux.Handle("POST /api/tasks/{id}/run", h.auth.require(http.HandlerFunc(h.handleRunTask)))
+	mux.Handle("GET /api/runs", h.auth.require(http.HandlerFunc(h.handleListRuns)))
+	mux.Handle("GET /api/backups", h.auth.require(http.HandlerFunc(h.handleListBackups)))
 
 	mux.HandleFunc("GET /ws/agent", h.handleAgentWS)
 	mux.Handle("GET /ws/panel", h.auth.require(http.HandlerFunc(h.handlePanelWS)))

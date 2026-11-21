@@ -3,6 +3,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -32,6 +34,10 @@ type Agent struct {
 	url      string
 	hostname string
 	log      *slog.Logger
+
+	// sendMu 保护连接写：心跳与备份上报来自不同 goroutine，coder/websocket
+	// 同一时刻只允许一个写者，并发写会直接报错
+	sendMu sync.Mutex
 }
 
 // fatalError 表示重试也没有意义的错误（例如被同 token 的另一个 Agent 顶替）。
@@ -152,17 +158,18 @@ func (a *Agent) session(ctx context.Context) error {
 		case err := <-readErr:
 			return classifyReadError(err)
 		case data := <-msgs:
-			a.handle(data)
+			a.handle(sctx, conn, data)
 		case <-ticker.C:
 			hb := proto.Heartbeat{Type: proto.TypeHeartbeat, TS: time.Now().Unix()}
-			if err := writeMsg(sctx, conn, hb); err != nil {
+			if err := a.send(sctx, conn, hb); err != nil {
 				return fmt.Errorf("发送心跳失败: %w", err)
 			}
 		}
 	}
 }
 
-func (a *Agent) handle(data []byte) {
+// handle 分发 Hub 下发的指令。备份在独立 goroutine 执行，不阻塞心跳循环。
+func (a *Agent) handle(ctx context.Context, conn *websocket.Conn, data []byte) {
 	typ, err := proto.PeekType(data)
 	if err != nil {
 		return
@@ -171,9 +178,32 @@ func (a *Agent) handle(data []byte) {
 	case proto.TypeWelcome:
 		a.log.Info("已连接到 Hub", "hostname", a.hostname)
 	case proto.TypeHeartbeatAck:
+	case proto.TypeTaskBackup:
+		var msg proto.TaskBackup
+		if err := json.Unmarshal(data, &msg); err != nil {
+			a.log.Warn("task_backup 消息不合法", "error", err)
+			return
+		}
+		go a.runBackup(ctx, conn, msg)
+	case proto.TypeStorageTest:
+		var msg proto.StorageTest
+		if err := json.Unmarshal(data, &msg); err != nil {
+			a.log.Warn("storage_test 消息不合法", "error", err)
+			return
+		}
+		go a.runStorageTest(ctx, conn, msg)
 	default:
 		a.log.Debug("忽略未知消息类型", "type", typ)
 	}
+}
+
+// send 串行写消息；备份的进度/结果上报与心跳共用连接。
+func (a *Agent) send(ctx context.Context, conn *websocket.Conn, v any) error {
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
+	wctx, cancel := context.WithTimeout(ctx, proto.WriteTimeout)
+	defer cancel()
+	return wsjson.Write(wctx, conn, v)
 }
 
 func classifyReadError(err error) error {
@@ -191,8 +221,6 @@ func writeMsg(ctx context.Context, conn *websocket.Conn, v any) error {
 	defer cancel()
 	return wsjson.Write(wctx, conn, v)
 }
-
-// backoff 实现带抖动的指数退避。
 type backoff struct {
 	base, max, cur time.Duration
 }

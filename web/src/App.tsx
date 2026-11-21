@@ -1,11 +1,14 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { RequireAuth } from "./auth";
 import Layout from "./components/Layout";
+import BackupsPage from "./pages/BackupsPage";
 import DashboardPage from "./pages/DashboardPage";
 import LoginPage from "./pages/LoginPage";
 import PlaceholderPage from "./pages/PlaceholderPage";
 import ServersPage from "./pages/ServersPage";
 import SetupPage from "./pages/SetupPage";
+import StoragesPage from "./pages/StoragesPage";
+import TasksPage from "./pages/TasksPage";
 
 export default function App() {
   return (
@@ -16,9 +19,9 @@ export default function App() {
         <Route element={<Layout />}>
           <Route index element={<DashboardPage />} />
           <Route path="servers" element={<ServersPage />} />
-          <Route path="tasks" element={<PlaceholderPage title="备份任务" />} />
-          <Route path="backups" element={<PlaceholderPage title="备份库" />} />
-          <Route path="storages" element={<PlaceholderPage title="存储器" />} />
+          <Route path="storages" element={<StoragesPage />} />
+          <Route path="tasks" element={<TasksPage />} />
+          <Route path="backups" element={<BackupsPage />} />
           <Route path="settings" element={<PlaceholderPage title="设置" />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>

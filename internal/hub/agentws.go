@@ -80,6 +80,8 @@ func (h *Hub) handleAgentWS(w http.ResponseWriter, r *http.Request) {
 		h.dbCall(func(ctx context.Context) error { return h.store.UpdateLastSeen(ctx, srv.ID, end) })
 		h.publishStatus(srv.ID, false, "", "", end)
 		h.log.Info("Agent 已离线", "server", srv.Name, "reason", reason)
+		// 该 Agent 未完成的备份运行随连接一起终止，避免 run 永久卡在 running
+		h.failServerRunningRuns(srv.ID)
 	}
 	c.Close(websocket.StatusGoingAway, "")
 }
@@ -105,13 +107,21 @@ func (h *Hub) serveAgent(sess *agentSession, welcome proto.Welcome) error {
 		}
 		switch typ {
 		case proto.TypeHeartbeat:
-			if err := writeJSONMsg(h.ctx, sess.conn, proto.HeartbeatAck{Type: proto.TypeHeartbeatAck}); err != nil {
+			if err := sess.send(h.ctx, proto.HeartbeatAck{Type: proto.TypeHeartbeatAck}); err != nil {
 				return err
 			}
 			if now.Sub(sess.lastFlush) >= lastSeenFlushInterval {
 				sess.lastFlush = now
 				h.dbCall(func(ctx context.Context) error { return h.store.UpdateLastSeen(ctx, sess.serverID, now) })
 			}
+		case proto.TypeRunProgress:
+			h.handleRunProgress(data)
+		case proto.TypeRunDone:
+			h.handleRunDone(data)
+		case proto.TypeRunFailed:
+			h.handleRunFailed(data)
+		case proto.TypeStorageTestDone:
+			h.handleStorageTestDone(data)
 		default:
 			h.log.Debug("忽略未知消息类型", "type", typ)
 		}
