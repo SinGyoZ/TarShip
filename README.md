@@ -94,10 +94,12 @@ docker compose up -d --build
 3. 在目标服务器上以 root 执行安装命令（token 写入权限 600 的环境文件，不出现在进程列表）：
 
 ```bash
-# 1. 下载到临时文件并原子替换（覆盖运行中的二进制必须走 mv）
+# 1. 下载到临时文件，用 Release 校验和验证后原子替换（覆盖运行中的二进制必须走 mv）
 curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/tarship-linux-amd64 -o /tmp/tarship.new \
+  && curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/checksums.txt -o /tmp/tarship.sha256 \
+  && grep "tarship-linux-amd64" /tmp/tarship.sha256 | awk '{print $1"  tarship.new"}' | (cd /tmp && sha256sum -c -) \
   && chmod +x /tmp/tarship.new \
-  && mv /tmp/tarship.new /usr/local/bin/tarship
+  && sudo mv /tmp/tarship.new /usr/local/bin/tarship
 
 # 2. 写入配置文件（权限 600）
 sudo install -m 600 /dev/null /etc/tarship-agent.env
@@ -256,7 +258,7 @@ server {
 
 ## 本地构建与开发
 
-依赖：Go 1.22+、Node.js 20+（含 npm）。
+依赖：Go 1.27+、Node.js 22+（含 npm；Vite 8 对 Node 有版本下限要求）。
 
 ```bash
 # 工作目录：TarShip 项目根
@@ -292,7 +294,7 @@ TarShip/
 ## 常见问题
 
 **Q：怀疑面板跑的不是最新版？**
-镜像由 CI 自动构建：`latest` = 最新稳定 Release，`edge` = main 开发版。升级：`docker compose pull && docker compose up -d`；确认容器内版本可执行 `docker compose exec tarship /tarship version`（应显示版本号，如 `v0.1.2`）。仪表盘的「版本落后」按语义化版本比较，Agent 版本低于 Hub 才计入；开发版（dev）不参与比较。
+镜像由 CI 自动构建：`latest` = 最新稳定 Release，`edge` = main 开发版。升级：`docker compose pull && docker compose up -d`；确认容器内版本可执行 `docker compose exec tarship /usr/local/bin/tarship version`（应显示版本号，如 `v0.2.1`）。仪表盘的「版本落后」按语义化版本比较，Agent 版本低于 Hub 才计入；开发版（dev）不参与比较。
 
 **Q：Token 忘了保存怎么办？**
 无法找回明文（库里只存 SHA-256）。在服务器列表点「重置 Token」生成新的，旧 Agent 自动失联，用新 Token 重新部署。
@@ -306,7 +308,7 @@ TarShip/
 为了极致体积（约 18MB）与最小攻击面。排障用 `docker logs`；需要进入文件系统可用 `docker export`。Hub 对外提供 `/healthz` 探活端点（无需登录）。
 
 **Q：数据目录怎么备份？**
-`/data`（或 `--data` 指定目录）里只有 `tarship.db` 与 `jwt.secret` 两个关键文件。直接复制这两个文件即可（SQLite 已启用 WAL，建议先停容器再复制，或使用 `sqlite3 .backup`）。
+`/data`（或 `--data` 指定目录）里只有一个关键文件 `tarship.db`（管理员账号、服务器、JWT 密钥全在库里）。SQLite 已启用 WAL，建议先停容器再复制，或使用 `sqlite3 .backup`；热拷贝时请连同 `tarship.db-wal`、`tarship.db-shm` 一起复制。
 
 **Q：能换端口吗？**
 可以：Hub 用 `--addr :9090`（compose 里改 ports 映射），Agent 连接地址相应变更。
@@ -314,6 +316,13 @@ TarShip/
 ## 更新记录
 
 完整历史见 [CHANGELOG.md](./CHANGELOG.md)。
+
+### v0.2.1 · 文档与细节修正（2026-11-21）
+
+- README：容器内二进制路径、备份 FAQ（JWT 密钥已入库）、构建依赖版本修正
+- 安装命令：下载后用 Release 校验和验证 sha256；`mv` 步骤补 `sudo`
+- release.yml：Node 统一为 22，校验和去路径前缀
+- 入口内嵌 `time/tzdata`（scratch 无时区数据，为 M2 cron 铺垫）
 
 ### v0.2.0 · M0 合并重构（2026-11-21）
 

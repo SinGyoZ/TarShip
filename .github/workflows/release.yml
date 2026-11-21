@@ -18,7 +18,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 与 ci.yml / Dockerfile 统一为 22（Vite 8 对 Node 有下限要求）
+          node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -42,7 +43,8 @@ jobs:
               -ldflags "-s -w -X github.com/SinGyoZ/TarShip/internal/version.Version=${VERSION}" \
               -o "dist/tarship-linux-${ARCH}" ./cmd/tarship
           done
-          sha256sum dist/tarship-linux-* > dist/checksums.txt
+          # 在 dist 目录内生成校验和，行内不带路径前缀，方便安装命令直接 sha256sum -c
+          (cd dist && sha256sum tarship-linux-* > checksums.txt)
           ls -lh dist/
 
       - name: 创建 Release 并上传资产

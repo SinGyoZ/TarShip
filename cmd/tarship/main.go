@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"syscall"
 	"time"
+	// scratch 镜像不带系统时区数据；内嵌 tzdata 使 M2 的 cron 调度支持时区
+	_ "time/tzdata"
 
 	"github.com/SinGyoZ/TarShip/internal/agent"
 	"github.com/SinGyoZ/TarShip/internal/config"
