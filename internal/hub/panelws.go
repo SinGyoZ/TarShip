@@ -1,116 +1,139 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
-	"log"
-	"net/http"
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
+	"net/http"
 )
 
-// PanelHub 向所有已认证的面板连接广播服务器状态事件；
-// 面板收到事件后自行失效查询缓存，实现"实时在线状态"而无需轮询。
-type PanelHub struct {
-	auth *authService
+const panelPingInterval = 25 * time.Second // 小于常见反向代理 60s 的空闲超时
 
-	// snapshot 返回当前在线 Agent 快照；绑定发生在 Hub 装配阶段、首个连接之前
-	snapshot func() map[int64]onlineInfo
-
-	mu    sync.Mutex
-	conns map[*websocket.Conn]struct{}
+// panelBroker 把事件广播给所有打开的面板页面。
+type panelBroker struct {
+	mu   sync.Mutex
+	subs map[*panelSub]struct{}
 }
 
-func newPanelHub(auth *authService) *PanelHub {
-	return &PanelHub{auth: auth, conns: make(map[*websocket.Conn]struct{})}
+type panelSub struct {
+	ch       chan []byte
+	overflow chan struct{}
 }
 
-// bindSnapshot 注入在线状态提供方（避免与 AgentHub 循环依赖）。
-func (p *PanelHub) bindSnapshot(fn func() map[int64]onlineInfo) {
-	p.snapshot = fn
+func newPanelBroker() *panelBroker {
+	return &panelBroker{subs: map[*panelSub]struct{}{}}
 }
 
-// panelEvent 面板侧事件载荷。M0 事件：server_online / server_offline / server_removed。
-type panelEvent struct {
-	Type string     `json:"type"`
-	Data onlineInfo `json:"data,omitempty"`
+func (b *panelBroker) subscribe() *panelSub {
+	s := &panelSub{ch: make(chan []byte, 64), overflow: make(chan struct{}, 1)}
+	b.mu.Lock()
+	b.subs[s] = struct{}{}
+	b.mu.Unlock()
+	return s
 }
 
-func (p *PanelHub) HandlePanelWS(w http.ResponseWriter, r *http.Request) {
-	// 浏览器 WebSocket 无法携带自定义头，但会带上会话 Cookie，据此鉴权
-	if _, err := p.auth.sessionUser(r); err != nil {
-		httpError(w, http.StatusUnauthorized, "未登录或会话已过期")
-		return
-	}
-	conn, err := upgrader.Upgrade(w, r, nil)
+func (b *panelBroker) unsubscribe(s *panelSub) {
+	b.mu.Lock()
+	delete(b.subs, s)
+	b.mu.Unlock()
+}
+
+// publish 非阻塞广播；某个页面消费太慢时通知它断开重连（重连后会收到完整快照）。
+func (b *panelBroker) publish(v any) {
+	data, err := json.Marshal(v)
 	if err != nil {
 		return
 	}
-	p.mu.Lock()
-	p.conns[conn] = struct{}{}
-	p.mu.Unlock()
-	// 注册回执：新开面板页立刻获得当前在线快照，无需等待下一个事件
-	online := make([]onlineInfo, 0)
-	if p.snapshot != nil {
-		for _, info := range p.snapshot() {
-			online = append(online, info)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for s := range b.subs {
+		select {
+		case s.ch <- data:
+		default:
+			select {
+			case s.overflow <- struct{}{}:
+			default:
+			}
 		}
 	}
-	_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-	if err := conn.WriteJSON(map[string]any{"type": "panel_hello", "online": online}); err != nil {
-		p.remove(conn)
-		return
-	}
-	go p.readPump(conn)
 }
 
-// readPump 只负责感知断开：面板不向 Hub 发消息，读到任何内容或错误即清理。
-func (p *PanelHub) readPump(conn *websocket.Conn) {
-	defer p.remove(conn)
+type statusEvent struct {
+	Type         string `json:"type"`
+	ServerID     int64  `json:"server_id"`
+	Online       bool   `json:"online"`
+	Hostname     string `json:"hostname,omitempty"`
+	AgentVersion string `json:"agent_version,omitempty"`
+	LastSeenAt   string `json:"last_seen_at"`
+}
+
+func (h *Hub) publishStatus(id int64, online bool, hostname, version string, seen time.Time) {
+	h.panel.publish(statusEvent{
+		Type: "server_status", ServerID: id, Online: online,
+		Hostname: hostname, AgentVersion: version, LastSeenAt: seen.UTC().Format(time.RFC3339Nano),
+	})
+}
+
+func (h *Hub) publishServersChanged() {
+	h.panel.publish(map[string]string{"type": "servers_changed"})
+}
+
+func (h *Hub) handlePanelWS(w http.ResponseWriter, r *http.Request) {
+	// Accept 默认要求 Origin 与 Host 同源，浏览器跨站发起的 WebSocket 会被拒绝。
+	c, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		return
+	}
+	h.wg.Add(1)
+	defer h.wg.Done()
+	defer c.CloseNow()
+
+	ctx := c.CloseRead(h.ctx)
+	// 先订阅再取快照，避免两者之间的事件丢失。
+	sub := h.panel.subscribe()
+	defer h.panel.unsubscribe(sub)
+
+	servers, err := h.listDTOs(ctx)
+	if err != nil {
+		h.log.Error("面板快照失败", "error", err)
+		c.Close(websocket.StatusInternalError, "internal error")
+		return
+	}
+	snapshot, _ := json.Marshal(map[string]any{"type": "snapshot", "servers": servers})
+	if !writeText(ctx, c, snapshot) {
+		return
+	}
+
+	ping := time.NewTicker(panelPingInterval)
+	defer ping.Stop()
 	for {
-		// 读超时设长一些；面板刷新页面即可重连，这里只兜底清理死连接
-		_ = conn.SetReadDeadline(time.Now().Add(24 * time.Hour))
-		if _, _, err := conn.ReadMessage(); err != nil {
+		select {
+		case <-ctx.Done():
+			c.Close(websocket.StatusGoingAway, "")
 			return
+		case msg := <-sub.ch:
+			if !writeText(ctx, c, msg) {
+				return
+			}
+		case <-sub.overflow:
+			c.Close(websocket.StatusTryAgainLater, "消息积压，请重连")
+			return
+		case <-ping.C:
+			pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := c.Ping(pctx)
+			cancel()
+			if err != nil {
+				return
+			}
 		}
 	}
 }
 
-func (p *PanelHub) remove(conn *websocket.Conn) {
-	p.mu.Lock()
-	delete(p.conns, conn)
-	p.mu.Unlock()
-	conn.Close()
-}
-
-// broadcast 向全部面板连接推送事件；单连接写失败只影响该连接本身。
-func (p *PanelHub) broadcast(ev panelEvent) {
-	data, err := json.Marshal(ev)
-	if err != nil {
-		log.Printf("[panel] 序列化事件失败: %v", err)
-		return
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for conn := range p.conns {
-		_ = conn.SetWriteDeadline(time.Now().Add(writeTimeout))
-		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
-			// 写失败即视为死连接，删除动作 defer 由锁内直接执行
-			delete(p.conns, conn)
-			conn.Close()
-		}
-	}
-}
-
-func (p *PanelHub) broadcastOnline(info onlineInfo) {
-	p.broadcast(panelEvent{Type: "server_online", Data: info})
-}
-
-func (p *PanelHub) broadcastOffline(serverID int64) {
-	p.broadcast(panelEvent{Type: "server_offline", Data: onlineInfo{ServerID: serverID}})
-}
-
-func (p *PanelHub) broadcastRemoved(serverID int64) {
-	p.broadcast(panelEvent{Type: "server_removed", Data: onlineInfo{ServerID: serverID}})
+func writeText(ctx context.Context, c *websocket.Conn, data []byte) bool {
+	wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return c.Write(wctx, websocket.MessageText, data) == nil
 }

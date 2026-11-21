@@ -1,47 +1,61 @@
-// API 调用封装：统一错误提取与 JSON 解析。
-export async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const resp = await fetch(path, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    credentials: 'same-origin',
-  });
-  const body = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    const err = (body as { error?: string }).error || `请求失败（HTTP ${resp.status}）`;
-    throw new Error(err);
+import type { DashboardStats, Server, ServerWithToken } from "./types";
+
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    public code: string,
+    message: string,
+  ) {
+    super(message);
   }
-  return body as T;
 }
 
-export interface AuthStatus {
-  initialized: boolean;
-  version: string;
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  let resp: Response;
+  try {
+    resp = await fetch(path, {
+      method,
+      credentials: "same-origin",
+      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new ApiError(0, "network", "无法连接到 Hub，请检查网络后重试");
+  }
+  if (resp.status === 204) {
+    return undefined as T;
+  }
+  const data: unknown = await resp.json().catch(() => null);
+  if (!resp.ok) {
+    const err = (data as { error?: { code?: string; message?: string } } | null)?.error;
+    throw new ApiError(resp.status, err?.code ?? "unknown", err?.message ?? `请求失败（HTTP ${resp.status}）`);
+  }
+  return data as T;
 }
 
-export interface Me {
-  username: string;
-  version: string;
-}
+export const api = {
+  setupStatus: () => request<{ initialized: boolean }>("GET", "/api/setup/status"),
+  setup: (body: { setup_token: string; username: string; password: string }) =>
+    request<{ username: string }>("POST", "/api/auth/setup", body),
+  login: (body: { username: string; password: string }) =>
+    request<{ username: string }>("POST", "/api/auth/login", body),
+  logout: () => request<void>("POST", "/api/auth/logout"),
+  /** 未登录时返回 null，而不是抛错，方便路由守卫判断。 */
+  me: async (): Promise<{ username: string } | null> => {
+    try {
+      return await request<{ username: string }>("GET", "/api/auth/me");
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) return null;
+      throw e;
+    }
+  },
+  listServers: () => request<Server[]>("GET", "/api/servers"),
+  dashboard: () => request<DashboardStats>("GET", "/api/dashboard"),
+  createServer: (name: string) => request<ServerWithToken>("POST", "/api/servers", { name }),
+  deleteServer: (id: number) => request<void>("DELETE", `/api/servers/${id}`),
+  resetToken: (id: number) => request<ServerWithToken>("POST", `/api/servers/${id}/reset-token`),
+};
 
-export interface ServerRow {
-  id: number;
-  name: string;
-  online: boolean;
-  hostname: string;
-  agent_version?: string;
-  tags: string;
-  last_seen: string;
-  created_at: string;
-}
-
-export interface CreateServerResult {
-  id: number;
-  name: string;
-  token: string;
-  install_command: string;
-}
-
-export interface DashboardStats {
-  version: string;
-  servers: { total: number; online: number; offline: number; outdated: number };
+export function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : "发生未知错误";
 }

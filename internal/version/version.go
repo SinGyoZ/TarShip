@@ -1,7 +1,5 @@
-// Package version 集中维护全项目版本号。
-// Hub 与 Agent 是同一二进制，版本必须一致比较，因此放在共享包。
+// Package version 保存构建时注入的版本号。
 package version
 
-// Version 为构建时通过 -ldflags "-X github.com/SinGyoZ/TarShip/internal/version.Version=vX.Y.Z"
-// 注入的版本号；直接 go build 时使用默认值。
-var Version = "0.1.0-dev"
+// Version 由 -ldflags "-X github.com/SinGyoZ/TarShip/internal/version.Version=x.y.z" 注入。
+var Version = "dev"

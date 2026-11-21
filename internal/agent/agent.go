@@ -1,198 +1,212 @@
-// Package agent 为 TarShip 代理端：主动连出 Hub 长连接，接收指令并回报心跳。
-// 服务器零入站端口（方案 3.1），断线按指数退避自动重连。
+// Package agent 实现部署在被备份服务器上的 Agent：出站连接 Hub、心跳、断线重连。
 package agent
 
 import (
 	"context"
-	"flag"
+	"errors"
 	"fmt"
-	"log"
+	"log/slog"
+	"math/rand/v2"
 	"net/http"
+	"net/url"
 	"os"
-	"os/signal"
-	"strings"
-	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 
+	"github.com/SinGyoZ/TarShip/internal/proto"
 	"github.com/SinGyoZ/TarShip/internal/version"
 )
 
-const (
-	defaultHeartbeat   = 30 * time.Second
-	readTimeout        = 90 * time.Second // 与 Hub 一致：超时无消息即认为链路已死
-	minBackoff         = time.Second
-	maxBackoff         = time.Minute
-	closeWriteDeadline = 3 * time.Second
-)
+// Config 是 Agent 的运行配置。
+type Config struct {
+	Server          string
+	Token           string
+	AllowInsecureWS bool
+}
 
-// Run 解析 agent 子命令参数并进入连接循环（M0 验收项：子命令参数齐全）。
-func Run(args []string) {
-	fs := flag.NewFlagSet("agent", flag.ExitOnError)
-	server := fs.String("server", "", "Hub 地址，如 wss://hub.example.com:8080（也接受 http(s):// 写法）")
-	token := fs.String("token", "", "面板注册服务器时生成的 Agent token")
-	hostname := fs.String("hostname", "", "上报的主机名（默认取操作系统主机名）")
-	heartbeat := fs.Duration("heartbeat", defaultHeartbeat, "心跳间隔")
-	_ = fs.Parse(args)
+// Agent 维持与 Hub 的长连接。
+type Agent struct {
+	cfg      Config
+	url      string
+	hostname string
+	log      *slog.Logger
+}
 
-	if *server == "" || *token == "" {
-		fmt.Fprintln(os.Stderr, "必须提供 --server 与 --token 参数，示例：")
-		fmt.Fprintln(os.Stderr, "  tarship agent --server wss://hub.example.com:8080 --token tsk_xxx")
-		os.Exit(2)
+// fatalError 表示重试也没有意义的错误（例如被同 token 的另一个 Agent 顶替）。
+type fatalError struct{ msg string }
+
+func (e *fatalError) Error() string { return e.msg }
+
+// New 校验配置并创建 Agent。
+func New(cfg Config, log *slog.Logger) (*Agent, error) {
+	u, err := WSURL(cfg.Server, cfg.AllowInsecureWS)
+	if err != nil {
+		return nil, err
 	}
-	host := strings.TrimSpace(*hostname)
-	if host == "" {
-		if h, err := os.Hostname(); err == nil {
-			host = h
-		} else {
-			host = "unknown"
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "unknown"
+	}
+	return &Agent{cfg: cfg, url: u, hostname: host, log: log}, nil
+}
+
+// WSURL 把 --server 参数规范化为 Agent 连接地址。默认只接受 wss://，
+// 因为 token 会在握手头里传输，明文连接等于把它交给链路上的任何人。
+func WSURL(server string, allowInsecure bool) (string, error) {
+	u, err := url.Parse(server)
+	if err != nil || u.Host == "" {
+		return "", fmt.Errorf("Hub 地址不合法: %q，示例: wss://hub.example.com", server)
+	}
+	switch u.Scheme {
+	case "wss":
+	case "ws":
+		if !allowInsecure {
+			return "", errors.New("拒绝使用明文 ws:// 连接（token 会被明文传输）；仅本地调试可加 --allow-insecure-ws")
 		}
+	default:
+		return "", fmt.Errorf("Hub 地址必须以 wss:// 开头，当前是 %q", server)
 	}
-	if *heartbeat < 5*time.Second {
-		log.Fatalf("[agent] 心跳间隔过短（最小 5s）: %v", *heartbeat)
-	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	c := &client{server: *server, token: *token, hostname: host, heartbeat: *heartbeat}
-	log.Printf("[agent] TarShip Agent v%s 启动，目标 %s", version.Version, *server)
-	c.connectLoop(ctx)
-	log.Println("[agent] 已退出")
+	return u.JoinPath(proto.AgentWSPath).String(), nil
 }
 
-type client struct {
-	server    string
-	token     string
-	hostname  string
-	heartbeat time.Duration
-}
-
-// connectLoop 持续维持与 Hub 的连接；每次会话失败后按指数退避重试。
-func (c *client) connectLoop(ctx context.Context) {
-	backoff := minBackoff
+// Run 保持连接直到 ctx 取消；遇到致命错误时返回它。
+func (a *Agent) Run(ctx context.Context) error {
+	bo := newBackoff(time.Second, time.Minute)
 	for {
-		err := c.session(ctx)
+		started := time.Now()
+		err := a.session(ctx)
 		if ctx.Err() != nil {
-			return
+			return nil
 		}
-		if err != nil {
-			log.Printf("[agent] 连接中断: %v；%s 后重连", err, backoff)
+		var fe *fatalError
+		if errors.As(err, &fe) {
+			return fe
 		}
+		if time.Since(started) >= time.Minute {
+			bo.reset() // 稳定连接过一段时间，说明之前的故障已恢复，退避从头开始
+		}
+		d := bo.next()
+		a.log.Warn("与 Hub 的连接已断开，稍后重试", "error", err, "retry_in", d.Round(time.Millisecond))
 		select {
 		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
+			return nil
+		case <-time.After(d):
 		}
 	}
 }
 
-// session 建立一次连接直到断开；返回错误交由外层退避重连。
-func (c *client) session(ctx context.Context) error {
-	wsURL, err := agentWSURL(c.server)
+func (a *Agent) session(ctx context.Context) error {
+	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	conn, resp, err := websocket.Dial(dctx, a.url, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": []string{"Bearer " + a.cfg.Token}},
+	})
+	cancel()
 	if err != nil {
-		return err
-	}
-	header := http.Header{}
-	// token 走请求头而非 URL，避免落在反代访问日志里
-	header.Set("Authorization", "Bearer "+c.token)
-
-	dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	conn, _, err := websocket.DefaultDialer.DialContext(dialCtx, wsURL, header)
-	if err != nil {
-		return fmt.Errorf("拨号失败: %w", err)
-	}
-	defer conn.Close()
-
-	if err := conn.WriteJSON(map[string]any{
-		"type":          "hello",
-		"agent_version": version.Version,
-		"hostname":      c.hostname,
-	}); err != nil {
-		return fmt.Errorf("发送 hello: %w", err)
-	}
-	log.Printf("[agent] 已连接 %s（%s）", wsURL, c.hostname)
-
-	send := make(chan any, 16)
-	errCh := make(chan error, 2)
-	go c.readPump(conn, send, errCh)
-	go c.writePump(conn, send, errCh)
-
-	select {
-	case <-ctx.Done():
-		// 收到退出信号：发 close 帧后静默退出，不触发重连
-		_ = conn.WriteControl(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "agent shutdown"),
-			time.Now().Add(closeWriteDeadline))
-		return nil
-	case err := <-errCh:
-		return err
-	}
-}
-
-// readPump 只读；Hub 应用层 ping 在此应答 pong，保证双向链路活性检测。
-func (c *client) readPump(conn *websocket.Conn, send chan<- any, errCh chan<- error) {
-	var msg struct {
-		Type string `json:"type"`
-		TS   int64  `json:"ts"`
-	}
-	for {
-		_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
-		if err := conn.ReadJSON(&msg); err != nil {
-			errCh <- err
-			return
+		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
+			return errors.New("Hub 拒绝了该 token（401）：请确认服务器未被删除、token 未被重置")
 		}
-		if msg.Type == "ping" {
+		return fmt.Errorf("连接 Hub 失败: %w", err)
+	}
+	defer conn.CloseNow()
+	conn.SetReadLimit(proto.MaxMessageBytes)
+
+	sctx, scancel := context.WithCancel(ctx)
+	defer scancel()
+
+	hello := proto.Hello{
+		Type: proto.TypeHello, AgentVersion: version.Version,
+		Hostname: a.hostname, ProtocolVersion: proto.Version,
+	}
+	if err := writeMsg(sctx, conn, hello); err != nil {
+		return fmt.Errorf("发送 hello 失败: %w", err)
+	}
+
+	msgs := make(chan []byte)
+	readErr := make(chan error, 1)
+	go func() {
+		for {
+			rctx, rcancel := context.WithTimeout(sctx, proto.OfflineTimeout)
+			_, data, err := conn.Read(rctx)
+			rcancel()
+			if err != nil {
+				readErr <- err
+				return
+			}
 			select {
-			case send <- map[string]any{"type": "pong", "ts": time.Now().Unix()}:
-			default: // 发送队列满时丢弃本轮 pong，心跳仍会维持 Hub 侧活性
+			case msgs <- data:
+			case <-sctx.Done():
+				return
 			}
 		}
-	}
-}
+	}()
 
-// writePump 唯一写者：心跳定时与 pong 应答统一经此串行发送，规避并发写。
-func (c *client) writePump(conn *websocket.Conn, send <-chan any, errCh chan<- error) {
-	ticker := time.NewTicker(c.heartbeat)
+	ticker := time.NewTicker(proto.HeartbeatInterval)
 	defer ticker.Stop()
 	for {
 		select {
-		case msg := <-send:
-			if err := writeJSON(conn, msg); err != nil {
-				errCh <- err
-				return
-			}
+		case <-ctx.Done():
+			conn.Close(websocket.StatusNormalClosure, "agent exiting")
+			return ctx.Err()
+		case err := <-readErr:
+			return classifyReadError(err)
+		case data := <-msgs:
+			a.handle(data)
 		case <-ticker.C:
-			if err := writeJSON(conn, map[string]any{"type": "heartbeat", "ts": time.Now().Unix()}); err != nil {
-				errCh <- err
-				return
+			hb := proto.Heartbeat{Type: proto.TypeHeartbeat, TS: time.Now().Unix()}
+			if err := writeMsg(sctx, conn, hb); err != nil {
+				return fmt.Errorf("发送心跳失败: %w", err)
 			}
 		}
 	}
 }
 
-func writeJSON(conn *websocket.Conn, v any) error {
-	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-	return conn.WriteJSON(v)
+func (a *Agent) handle(data []byte) {
+	typ, err := proto.PeekType(data)
+	if err != nil {
+		return
+	}
+	switch typ {
+	case proto.TypeWelcome:
+		a.log.Info("已连接到 Hub", "hostname", a.hostname)
+	case proto.TypeHeartbeatAck:
+	default:
+		a.log.Debug("忽略未知消息类型", "type", typ)
+	}
 }
 
-// agentWSURL 把 http(s) 归一化为 ws(s) 并拼上 Agent 长连接端点。
-func agentWSURL(server string) (string, error) {
-	s := strings.TrimRight(strings.TrimSpace(server), "/")
-	switch {
-	case strings.HasPrefix(s, "wss://"), strings.HasPrefix(s, "ws://"):
-	case strings.HasPrefix(s, "https://"):
-		s = "wss://" + strings.TrimPrefix(s, "https://")
-	case strings.HasPrefix(s, "http://"):
-		s = "ws://" + strings.TrimPrefix(s, "http://")
-	default:
-		return "", fmt.Errorf("--server 需以 ws:// wss:// http:// https:// 开头: %q", server)
+func classifyReadError(err error) error {
+	switch websocket.CloseStatus(err) {
+	case proto.CloseReplaced:
+		return &fatalError{"同一 token 已被另一个 Agent 使用并顶替了本连接：请确认没有重复部署"}
+	case proto.CloseProtocolMismatch:
+		return &fatalError{"Agent 与 Hub 的协议版本不兼容：请把两端升级到同一版本"}
 	}
-	return s + "/ws/agent", nil
+	return fmt.Errorf("连接中断: %w", err)
 }
+
+func writeMsg(ctx context.Context, conn *websocket.Conn, v any) error {
+	wctx, cancel := context.WithTimeout(ctx, proto.WriteTimeout)
+	defer cancel()
+	return wsjson.Write(wctx, conn, v)
+}
+
+// backoff 实现带抖动的指数退避。
+type backoff struct {
+	base, max, cur time.Duration
+}
+
+func newBackoff(base, max time.Duration) *backoff { return &backoff{base: base, max: max} }
+
+func (b *backoff) next() time.Duration {
+	d := b.cur
+	if d == 0 {
+		d = b.base
+	}
+	b.cur = min(d*2, b.max)
+	// ±20% 抖动，避免 Hub 重启后所有 Agent 同一时刻一起重连。
+	return time.Duration(float64(d) * (0.8 + 0.4*rand.Float64()))
+}
+
+func (b *backoff) reset() { b.cur = 0 }

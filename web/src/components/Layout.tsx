@@ -1,86 +1,81 @@
-import { NavLink, Outlet, useNavigate } from 'react-router-dom';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Button, Chip } from '@heroui/react';
-import { api, type Me } from '../api';
-import { usePanelSocket } from '../ws';
+import { Button, cn } from "@heroui/react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { api } from "../api";
+import { usePanelSocket, type SocketState } from "../hooks/usePanelSocket";
+import { Wordmark } from "./Wordmark";
 
-const NAV_ITEMS = [
-  { to: '/', label: '仪表盘', end: true },
-  { to: '/servers', label: '服务器' },
-  { to: '/tasks', label: '任务' },
-  { to: '/backups', label: '备份库' },
-  { to: '/storages', label: '存储器' },
-  { to: '/settings', label: '设置' },
+const NAV = [
+  { to: "/", label: "仪表盘", end: true },
+  { to: "/servers", label: "服务器" },
+  { to: "/tasks", label: "备份任务" },
+  { to: "/backups", label: "备份库" },
+  { to: "/storages", label: "存储器" },
+  { to: "/settings", label: "设置" },
 ];
 
-export default function Layout() {
-  usePanelSocket();
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
+const SOCKET_TEXT: Record<SocketState, string> = {
+  open: "实时更新已连接",
+  connecting: "正在连接实时更新…",
+  closed: "实时更新已断开，正在重试",
+};
 
+export default function Layout() {
+  const socket = usePanelSocket();
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const me = useQuery({ queryKey: ["me"], queryFn: api.me, staleTime: 30_000 });
   const logout = useMutation({
-    mutationFn: () => api<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
-    onSuccess: () => {
-      queryClient.clear();
-      navigate('/login');
+    mutationFn: api.logout,
+    onSettled: () => {
+      qc.setQueryData(["me"], null);
+      qc.removeQueries({ queryKey: ["servers"] });
+      navigate("/login", { replace: true });
     },
   });
 
-  const me = useQueryClient().getQueryData<Me>(['me']);
-
   return (
-    <div className="min-h-screen bg-background text-foreground-600">
-      <div className="mx-auto flex max-w-6xl gap-6 p-4 md:p-6">
-        {/* 侧边导航：窄屏折叠为顶部横向滚动条，保证移动端可用 */}
-        <nav className="flex shrink-0 flex-col gap-2 md:sticky md:top-6 md:h-fit md:w-44">
-          <div className="mb-2 hidden items-center gap-2 px-2 md:flex">
-            <span aria-hidden className="text-2xl">🚢</span>
-            <div>
-              <p className="text-lg font-bold text-foreground">TarShip</p>
-              <p className="text-xs text-foreground-500">目录备份运输系统</p>
-            </div>
-          </div>
-          <div className="flex gap-2 overflow-x-auto md:flex-col md:overflow-visible">
-            {NAV_ITEMS.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                className={({ isActive }) =>
-                  `whitespace-nowrap rounded-lg px-3 py-2 text-sm transition-colors ${
-                    isActive
-                      ? 'bg-primary/15 font-medium text-primary-600'
-                      : 'text-foreground-500 hover:bg-default-100'
-                  }`
-                }
-              >
-                {item.label}
-              </NavLink>
-            ))}
-          </div>
+    <div className="min-h-dvh md:grid md:grid-cols-[13rem_minmax(0,1fr)]">
+      <aside className="border-b border-border bg-surface md:sticky md:top-0 md:flex md:h-dvh md:flex-col md:border-r md:border-b-0">
+        <div className="flex items-center justify-between px-4 py-3 md:px-5 md:py-5">
+          <Wordmark />
+          <Button size="sm" variant="ghost" className="md:hidden" onPress={() => logout.mutate()}>
+            退出
+          </Button>
+        </div>
+        <nav aria-label="主导航" className="flex gap-1 overflow-x-auto px-2 pb-2 md:flex-1 md:flex-col md:overflow-visible md:px-3">
+          {NAV.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.end}
+              className={({ isActive }) =>
+                cn(
+                  "shrink-0 rounded-lg px-3 py-2 text-sm outline-none transition-colors focus-visible:ring-2 focus-visible:ring-focus",
+                  isActive ? "bg-accent text-accent-foreground font-medium" : "text-foreground hover:bg-surface-secondary",
+                )
+              }
+            >
+              {item.label}
+            </NavLink>
+          ))}
         </nav>
-
-        <main className="min-w-0 flex-1">
-          <header className="mb-4 flex items-center justify-between">
-            <Chip variant="flat" color="default" size="sm">
-              M0 骨架版 · {me?.version ?? ''}
-            </Chip>
-            <div className="flex items-center gap-3">
-              <span className="hidden text-sm text-foreground-500 sm:block">{me?.username}</span>
-              <Button
-                size="sm"
-                variant="flat"
-                color="danger"
-                isLoading={logout.isPending}
-                onPress={() => logout.mutate()}
-              >
-                退出登录
-              </Button>
-            </div>
-          </header>
-          <Outlet />
-        </main>
-      </div>
+        <div className="hidden space-y-2 border-t border-border p-4 text-sm md:block">
+          <p className="flex items-center gap-2 text-xs text-muted" role="status">
+            <span aria-hidden="true" className={cn("size-2 rounded-full", socket === "open" ? "bg-success" : "bg-warning")} />
+            {SOCKET_TEXT[socket]}
+          </p>
+          <div className="flex items-center justify-between gap-2">
+            <span className="truncate font-medium">{me.data?.username}</span>
+            <Button size="sm" variant="ghost" onPress={() => logout.mutate()}>
+              退出登录
+            </Button>
+          </div>
+        </div>
+      </aside>
+      <main className="min-w-0 px-4 py-6 md:px-10 md:py-8">
+        <Outlet />
+      </main>
     </div>
   );
 }

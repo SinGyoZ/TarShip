@@ -1,8 +1,8 @@
 .git
-bin/
-.data/
+.github
+bin
+data
 web/node_modules
 web/dist
-.temp
-*.log
-.env
+*.db
+*.md

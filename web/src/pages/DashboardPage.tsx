@@ -1,65 +1,107 @@
-import { useQuery } from '@tanstack/react-query';
-import { Card, CardBody, CardHeader, Chip } from '@heroui/react';
-import { api, type DashboardStats } from '../api';
+import { Button, Spinner } from "@heroui/react";
+import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
+import { api, errorMessage } from "../api";
+import { PageHeader } from "../components/PageHeader";
+import { StatusDot } from "../components/StatusDot";
+import { useNow } from "../hooks/useNow";
+import { relativeTime } from "../lib/format";
+
+function StatCard({ label, value, tone }: { label: string; value: number; tone?: "ok" | "warn" | "danger" }) {
+  const toneClass =
+    tone === "danger" ? "text-danger" : tone === "warn" ? "text-warning" : tone === "ok" ? "text-success" : "";
+  return (
+    <div className="rounded-xl border border-border bg-surface px-4 py-3">
+      <p className={`text-2xl font-semibold ${toneClass}`}>{value}</p>
+      <p className="mt-1 text-sm text-muted">{label}</p>
+    </div>
+  );
+}
 
 export default function DashboardPage() {
-  const { data, isPending, isError, error } = useQuery({
-    queryKey: ['dashboard'],
-    queryFn: () => api<DashboardStats>('/api/dashboard'),
-  });
+  const servers = useQuery({ queryKey: ["servers"], queryFn: api.listServers });
+  const stats = useQuery({ queryKey: ["dashboard"], queryFn: api.dashboard });
+  const now = useNow(30_000);
 
-  if (isPending) {
-    return <p className="py-10 text-center text-sm text-foreground-500">加载中…</p>;
+  if (servers.isPending) {
+    return (
+      <div className="flex items-center gap-3 py-10 text-muted" role="status">
+        <Spinner size="sm" />
+        <span>正在加载…</span>
+      </div>
+    );
   }
-  if (isError) {
-    return <p className="py-10 text-center text-sm text-danger">统计加载失败：{error.message}</p>;
+  if (servers.isError) {
+    return (
+      <div role="alert">
+        <p className="font-medium">加载失败</p>
+        <p className="mt-1 text-sm text-muted">{errorMessage(servers.error)}</p>
+        <Button className="mt-4" variant="secondary" onPress={() => void servers.refetch()}>
+          重试
+        </Button>
+      </div>
+    );
   }
 
-  const { servers } = data;
-  const stats = [
-    { label: '服务器总数', value: servers.total },
-    { label: '在线', value: servers.online, color: 'success' as const },
-    { label: '离线', value: servers.offline, color: 'warning' as const },
-    { label: '版本落后', value: servers.outdated, color: 'danger' as const },
-  ];
+  const list = servers.data;
+  const offline = list.filter((s) => !s.online);
+  const outdated = stats.data?.servers.outdated ?? 0;
+
+  if (list.length === 0) {
+    return (
+      <>
+        <PageHeader title="仪表盘" />
+        <div className="max-w-md">
+          <p className="font-medium">先添加一台服务器</p>
+          <p className="mt-1 text-sm text-muted">让目标机器上的 Agent 连上 Hub，在线状态会实时显示在这里。</p>
+          <Link to="/servers" className="mt-4 inline-block rounded-lg bg-accent px-4 py-2 text-sm font-medium text-accent-foreground">
+            添加服务器
+          </Link>
+        </div>
+      </>
+    );
+  }
 
   return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-xl font-bold">仪表盘</h1>
-        <p className="mt-1 text-sm text-foreground-500">服务器在线概况与系统版本信息</p>
+    <>
+      <PageHeader
+        title="仪表盘"
+        description={stats.data ? `Hub 版本 ${stats.data.version}` : undefined}
+      />
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <StatCard label="服务器总数" value={stats.data?.servers.total ?? list.length} />
+        <StatCard label="在线" value={stats.data?.servers.online ?? list.length - offline.length} tone="ok" />
+        <StatCard label="离线" value={stats.data?.servers.offline ?? offline.length} tone={offline.length > 0 ? "warn" : undefined} />
+        <StatCard label="版本落后" value={outdated} tone={outdated > 0 ? "danger" : undefined} />
       </div>
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        {stats.map((s) => (
-          <Card key={s.label} shadow="sm">
-            <CardBody className="items-start p-4">
-              <p className="text-2xl font-bold">{s.value}</p>
-              <div className="mt-1 flex items-center gap-2">
-                <span className="text-xs text-foreground-500">{s.label}</span>
-                {s.color && (
-                  <Chip size="sm" variant="flat" color={s.color}>
-                    {s.color === 'success' ? '正常' : s.color === 'warning' ? '待关注' : '需处理'}
-                  </Chip>
-                )}
-              </div>
-            </CardBody>
-          </Card>
-        ))}
-      </div>
+      {outdated > 0 ? (
+        <p role="status" className="mt-3 text-sm text-warning">
+          有 {outdated} 台 Agent 版本低于 Hub，请到「服务器」页重置对应 token 后重新执行安装命令完成升级。
+        </p>
+      ) : null}
 
-      <Card shadow="sm">
-        <CardHeader className="flex flex-col items-start gap-1">
-          <h2 className="text-base font-semibold">M0 骨架说明</h2>
-        </CardHeader>
-        <CardBody className="gap-2 text-sm text-foreground-500">
-          <p>当前为 M0（骨架）版本，已交付：面板登录、服务器接入与实时在线状态。</p>
-          <p>
-            备份核心能力（存储器、任务、备份与恢复）将在 <strong>M1 起逐里程碑</strong>
-            交付；Agent 与 Hub 版本不一致时会在服务器页提示升级。
-          </p>
-        </CardBody>
-      </Card>
-    </div>
+      {offline.length > 0 ? (
+        <section aria-labelledby="offline-heading" className="mt-6">
+          <h2 id="offline-heading" className="mb-2 text-base font-semibold">
+            需要关注：{offline.length} 台离线
+          </h2>
+          <ul className="divide-y divide-border rounded-xl border border-border bg-surface">
+            {offline.map((s) => (
+              <li key={s.id} className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+                <span className="font-medium">{s.name}</span>
+                <span className="flex items-center gap-4 text-sm text-muted">
+                  <StatusDot online={false} />
+                  {s.last_seen_at ? `最后在线 ${relativeTime(s.last_seen_at, now)}` : "从未连接"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : (
+        <p className="mt-6 text-sm">所有服务器都在线。</p>
+      )}
+      <p className="mt-8 text-sm text-muted">备份任务、备份库与存储器尚未开放，当前版本只提供服务器接入与在线状态。</p>
+    </>
   );
 }

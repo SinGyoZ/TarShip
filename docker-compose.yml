@@ -1,21 +1,27 @@
-# TarShip Hub 部署（方案 11.1）
+# TarShip Hub 部署
 #
 # 使用方式：
-#   本地构建部署（未发布镜像前的唯一正确方式）：docker compose up -d --build
-#   镜像已发布到 Docker Hub 后：docker compose up -d
+#   拉取 CI 构建的最新稳定版：docker compose up -d
+#   本地源码构建：docker compose up -d --build
+#   升级：docker compose pull && docker compose up -d
 #
-# 注意：singyoku/tarship 仓库名与旧版系统共用。若 Docker Hub 上存在旧版 latest
-# 镜像，`up` 不带 --build 会拉到旧版——务必按上方说明选择正确命令。
+# 首次启动的管理员初始化 setup token 在日志里：docker compose logs tarship
 services:
   tarship:
     image: singyoku/tarship:latest
     build: .
     command: hub
+    # Hub 不需要特权，以 nonroot 运行可缩小攻击面；
+    # 注意：从 v0.1.x（root 运行）升级时需先把旧卷的属主改为 65532（见 README 升级说明）。
+    user: "65532:65532"
     ports:
       - "8080:8080"
     volumes:
-      # SQLite + JWT 密钥全在此卷，务必对 /data 自身做好备份（可用 TarShip 自身备份此目录所在宿主路径）
+      # SQLite + JWT 密钥全在此卷，务必对它自身做好备份（可用 TarShip 自身备份宿主机的卷目录）
       - tarship-hub-data:/data
     restart: unless-stopped
+    # 放在反向代理（Caddy / Nginx）之后时，打开下面这行，登录限速才能按真实客户端 IP 计算：
+    # environment:
+    #   TARSHIP_TRUST_PROXY: "true"
 volumes:
   tarship-hub-data:

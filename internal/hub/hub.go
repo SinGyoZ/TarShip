@@ -1,116 +1,122 @@
-// Package hub 为 TarShip 控制面：REST API、Agent/面板 WebSocket、SQLite 与内嵌面板。
+// Package hub 实现控制面：面板 API、Agent 长连接、在线状态。
 package hub
 
 import (
 	"context"
 	"errors"
-	"flag"
-	"fmt"
-	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
-	"os"
-	"os/signal"
-	"strings"
-	"syscall"
+	"sync"
 	"time"
 
-	"github.com/SinGyoZ/TarShip/internal/db"
+	"github.com/SinGyoZ/TarShip/internal/store"
 	"github.com/SinGyoZ/TarShip/internal/version"
-	webui "github.com/SinGyoZ/TarShip/web"
 )
 
-// Run 解析 hub 子命令参数并启动控制面（M0 验收项：子命令参数齐全）。
-func Run(args []string) {
-	fs := flag.NewFlagSet("hub", flag.ExitOnError)
-	addr := fs.String("addr", ":8080", "HTTP 监听地址")
-	data := fs.String("data", "/data", "数据目录（SQLite、JWT 密钥等；裸机部署请指定可写目录）")
-	_ = fs.Parse(args)
+var errNotHello = errors.New("首条消息不是 hello")
 
-	if err := run(*addr, *data); err != nil {
-		log.Fatalf("[hub] 启动失败: %v", err)
-	}
+// Config 是 Hub 的运行配置。
+type Config struct {
+	Addr       string
+	DataDir    string
+	TrustProxy bool
 }
 
-func run(addr, dataDir string) error {
-	if err := os.MkdirAll(dataDir, 0o700); err != nil {
-		return fmt.Errorf("创建数据目录: %w", err)
+// Hub 聚合 Hub 的全部组件。
+type Hub struct {
+	cfg      Config
+	log      *slog.Logger
+	ctx      context.Context // Hub 的生命周期；取消后所有 WebSocket 循环退出
+	store    *store.Store
+	auth     *authService
+	presence *presence
+	panel    *panelBroker
+	wg       sync.WaitGroup // 跟踪 WebSocket handler，退出时等它们收尾
+}
+
+// New 组装 Hub，不监听端口。
+func New(ctx context.Context, cfg Config, st *store.Store, log *slog.Logger) (*Hub, error) {
+	auth, err := newAuthService(ctx, st, log, cfg.TrustProxy)
+	if err != nil {
+		return nil, err
 	}
-	database, err := db.Open(dataDir)
+	return &Hub{
+		cfg: cfg, log: log, ctx: ctx, store: st, auth: auth,
+		presence: newPresence(), panel: newPanelBroker(),
+	}, nil
+}
+
+// Run 打开数据库并运行 Hub，直到 ctx 取消。
+func Run(ctx context.Context, cfg Config, log *slog.Logger) error {
+	st, err := store.Open(cfg.DataDir)
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer st.Close()
 
-	st := &store{db: database}
-	authSvc, err := newAuth(st, dataDir)
+	h, err := New(ctx, cfg, st, log)
 	if err != nil {
-		return fmt.Errorf("初始化鉴权: %w", err)
+		return err
 	}
-	panel := newPanelHub(authSvc)
-	agents := newAgentHub(st, panel)
-	// 面板建连回执需要在线快照；bindSnapshot 必须先于首个 WS 连接
-	panel.bindSnapshot(agents.onlineMap)
-	apiSvc := newAPI(st, authSvc, agents)
-
-	root := http.NewServeMux()
-	// healthz 供外部探活（compose/监控）使用，无鉴权、需在 SPA fallback 之前注册
-	root.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		jsonWrite(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
-	root.Handle("/api/", apiSvc.routes())
-	root.HandleFunc("/ws/agent", agents.HandleAgentWS)
-	root.HandleFunc("/ws/panel", panel.HandlePanelWS)
-	root.Handle("/", spaHandler(webui.DistFS))
 	srv := &http.Server{
-		Addr:              addr,
-		Handler:           logRequest(root),
+		Addr:              cfg.Addr,
+		Handler:           h.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServe() }()
+	log.Info("Hub 已启动", "addr", cfg.Addr, "data", cfg.DataDir, "version", version.Version)
+
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
 	}
 
-	go func() {
-		log.Printf("[hub] TarShip v%s 启动完成，监听 %s（数据目录 %s）", version.Version, addr, dataDir)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("[hub] HTTP 服务异常退出: %v", err)
-		}
-	}()
-
-	// 优雅关闭：等待连接排空，Agent 重连由其指数退避兜底
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	<-ctx.Done()
-	log.Println("[hub] 收到退出信号，正在关闭…")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	log.Info("Hub 正在退出")
+	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	err = srv.Shutdown(sctx)
+	h.wg.Wait() // WebSocket 连接已被 Hijack，Shutdown 不会等它们，这里等 handler 收尾后再关库
+	return err
 }
 
-// spaHandler 服务内嵌面板静态文件；未命中的路径回退 index.html，交由前端路由接管。
-func spaHandler(dist fs.FS) http.Handler {
-	sub, err := fs.Sub(dist, "dist")
-	if err != nil {
-		log.Fatalf("[hub] 内嵌面板资源缺失: %v", err)
+// Handler 返回完整的 HTTP 处理器。
+func (h *Hub) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", h.handleHealth)
+
+	mux.HandleFunc("GET /api/setup/status", h.auth.handleSetupStatus)
+	mux.HandleFunc("POST /api/auth/setup", h.auth.handleSetup)
+	mux.HandleFunc("POST /api/auth/login", h.auth.handleLogin)
+	mux.HandleFunc("POST /api/auth/logout", h.auth.handleLogout)
+	mux.Handle("GET /api/auth/me", h.auth.require(http.HandlerFunc(h.auth.handleMe)))
+
+	mux.Handle("GET /api/servers", h.auth.require(http.HandlerFunc(h.handleListServers)))
+	mux.Handle("POST /api/servers", h.auth.require(http.HandlerFunc(h.handleCreateServer)))
+	mux.Handle("DELETE /api/servers/{id}", h.auth.require(http.HandlerFunc(h.handleDeleteServer)))
+	mux.Handle("POST /api/servers/{id}/reset-token", h.auth.require(http.HandlerFunc(h.handleResetToken)))
+	mux.Handle("GET /api/dashboard", h.auth.require(http.HandlerFunc(h.handleDashboard)))
+
+	mux.HandleFunc("GET /ws/agent", h.handleAgentWS)
+	mux.Handle("GET /ws/panel", h.auth.require(http.HandlerFunc(h.handlePanelWS)))
+
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, "not_found", "接口不存在")
+	})
+	mux.Handle("/", spaHandler())
+	return secureHeaders(csrfGuard(mux))
+}
+
+func (h *Hub) handleHealth(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	if err := h.store.Ping(ctx); err != nil {
+		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+		return
 	}
-	fileServer := http.FileServerFS(sub)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p := strings.TrimPrefix(r.URL.Path, "/")
-		if p == "" {
-			p = "index.html"
-		}
-		if _, err := fs.Stat(sub, p); err != nil {
-			// SPA 前端路由：刷新 /servers 等深链时必须回退到入口页
-			r.URL.Path = "/"
-		}
-		fileServer.ServeHTTP(w, r)
-	})
-}
-
-// logRequest 打印一行访问日志，便于裸机部署排查（容器下走 docker logs）。
-func logRequest(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		next.ServeHTTP(w, r)
-		// 静态资源与心跳类请求量小，M0 全量记录，M1 视规模再降噪
-		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
-	})
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte("ok"))
 }

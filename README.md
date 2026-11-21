@@ -89,27 +89,40 @@ docker compose up -d --build
 
 ### 2. 接入第一台服务器
 
-1. 面板 →「服务器」→「添加服务器」，填写名称、标签与 Hub 地址
-2. 创建后弹窗展示 **Agent Token（仅此一次）** 与一键安装命令，点击复制
-3. 在目标服务器上以 root 执行安装命令：
+1. 面板 →「服务器」→「添加服务器」，填写名称
+2. 创建后弹窗展示 **Agent Token（仅此一次）** 与一键安装命令，支持按目标机器架构切换（`amd64`/`arm64`），点击复制
+3. 在目标服务器上以 root 执行安装命令（token 写入权限 600 的环境文件，不出现在进程列表）：
 
 ```bash
-curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/tarship-linux-amd64 -o /tmp/tarship.new
-chmod +x /tmp/tarship.new
-mv /tmp/tarship.new /usr/local/bin/tarship
-cat > /etc/systemd/system/tarship-agent.service <<'EOF'
+# 1. 下载到临时文件并原子替换（覆盖运行中的二进制必须走 mv）
+curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/tarship-linux-amd64 -o /tmp/tarship.new \
+  && chmod +x /tmp/tarship.new \
+  && mv /tmp/tarship.new /usr/local/bin/tarship
+
+# 2. 写入配置文件（权限 600）
+sudo install -m 600 /dev/null /etc/tarship-agent.env
+sudo tee /etc/tarship-agent.env >/dev/null <<'EOF'
+TARSHIP_SERVER=wss://hub.example.com:8080
+TARSHIP_TOKEN=<TOKEN>
+EOF
+
+# 3. 注册为 systemd 服务并启动（安装与升级重装同一套命令）
+sudo tee /etc/systemd/system/tarship-agent.service >/dev/null <<'EOF'
 [Unit]
 Description=TarShip Agent
 After=network-online.target
+Wants=network-online.target
+
 [Service]
-ExecStart=/usr/local/bin/tarship agent --server wss://hub.example.com:8080 --token <TOKEN>
+EnvironmentFile=/etc/tarship-agent.env
+ExecStart=/usr/local/bin/tarship agent
 Restart=always
+RestartSec=5
+
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload
-systemctl enable tarship-agent
-systemctl restart tarship-agent
+sudo systemctl daemon-reload && sudo systemctl enable tarship-agent && sudo systemctl restart tarship-agent
 ```
 
 4. 回到面板，几秒内该服务器亮起「在线」状态
@@ -136,12 +149,12 @@ systemctl restart tarship-agent
 
 ### Agent 版本提示
 
-服务器列表展示各 Agent 版本号，仪表盘统计「版本落后」数量（Agent 版本 ≠ Hub 版本时计入）。Agent 不做自动升级，按需重新执行安装命令即可。
+服务器列表展示各 Agent 版本号，仪表盘统计「版本落后」数量（语义化比较，Agent 低于 Hub 才计入；开发版不参与）。Agent 不做自动升级，在服务器页重置 token 后重新执行安装命令即可。
 
 ### 心跳与重连行为
 
-- Agent 断线后按指数退避重连（1s → 2s → 4s … 封顶 60s），重连成功自动重新上线。
-- Hub 重启后全部 Agent 会自动回归在线，服务器注册记录与统计持久保存于 SQLite。
+- Agent 心跳 30 秒，超过 90 秒无消息判定离线；断线后指数退避重连（1s 起，封顶 60s，带抖动），**稳定连接 1 分钟后退避自动复位**。
+- 被同 token 的新连接顶替时旧 Agent 明确退出（不做无限互踩）；Hub 重启后全部 Agent 自动回归在线，服务器注册记录持久保存于 SQLite。
 
 ## 部署教程
 
@@ -183,16 +196,17 @@ make            # 先构建前端再编译二进制（产物 bin/tarship）
 
 ### Agent · 裸机 systemd（推荐）
 
-Agent 直接读取宿主机目录，裸机部署最简单。安装命令可直接在面板添加服务器向导中复制（`amd64`/`arm64` 可选）。
+Agent 直接读取宿主机目录，裸机部署最简单。安装命令可直接在面板 token 弹窗中复制（支持 `amd64`/`arm64` 切换）。
 
-`agent` 子命令参数：
+`agent` 子命令参数与环境变量（优先级：命令行 > 环境变量）：
 
-| 参数 | 默认值 | 说明 |
+| 参数 / 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `--server` | （必填） | Hub 地址，支持 `ws:// wss:// http:// https://` 写法 |
-| `--token` | （必填） | 面板生成的 Agent Token |
-| `--hostname` | 操作系统主机名 | 上报到面板的显示名 |
-| `--heartbeat` | `30s` | 心跳间隔（最小 5s） |
+| `--server` / `TARSHIP_SERVER` | （必填） | Hub 地址，必须以 `wss://` 开头 |
+| `--token` / `TARSHIP_TOKEN` | （必填） | 面板生成的 Agent Token；推荐用环境变量，避免出现在进程列表 |
+| `--allow-insecure-ws` / `TARSHIP_ALLOW_INSECURE_WS` | `false` | 允许明文 `ws://` 连接，仅限本地调试（token 会明文传输） |
+
+Agent 心跳固定 30 秒，主机名取操作系统值，不再提供覆盖参数。
 
 ### Agent · Docker 方式（备选）
 
@@ -200,7 +214,10 @@ Agent 直接读取宿主机目录，裸机部署最简单。安装命令可直�
 services:
   tarship-agent:
     image: singyoku/tarship:latest
-    command: agent --server wss://hub.example.com:8080 --token <TOKEN>
+    command: agent
+    environment:
+      TARSHIP_SERVER: wss://hub.example.com:8080
+      TARSHIP_TOKEN: <TOKEN>
     volumes:
       - /var/www:/var/www:ro   # 按需挂载要备份的目录（M1 起生效）
     restart: unless-stopped
@@ -229,10 +246,13 @@ server {
 
 | 变量 | 说明 |
 | --- | --- |
-| `TARSHIP_JWT_SECRET` | 可选，面板 JWT 签名密钥（至少 32 字节）；未设置时首次启动自动生成并保存到 `<data>/jwt.secret`（0600） |
+| `TARSHIP_JWT_SECRET` | 可选，面板 JWT 签名密钥（至少 32 字节）；未设置时首次启动自动生成并存入数据库 |
+| `TARSHIP_ADDR` / `TARSHIP_DATA` | hub 的监听地址 / 数据目录，与 `--addr` / `--data` 参数等价 |
+| `TARSHIP_TRUST_PROXY` | Hub 在可信反代之后时设为 `true`，登录限速按真实客户端 IP 计算 |
+| `TARSHIP_SERVER` / `TARSHIP_TOKEN` / `TARSHIP_ALLOW_INSECURE_WS` | Agent 连接配置，见上方参数表 |
 
 > [!NOTE]
-> Agent Token 经 `Authorization` 请求头传输，不会出现在 URL 与常规访问日志中；传输层安全由 `wss://` 保证。
+> Agent Token 经 `Authorization` 请求头传输，不落在 URL 与常规访问日志；传输层安全由 `wss://` 保证。Hub 内置 `healthcheck` 子命令供容器健康检查使用。
 
 ## 本地构建与开发
 
@@ -293,51 +313,40 @@ TarShip/
 
 ## 更新记录
 
-### v0.1.4 · 安装命令覆盖修复（2026-11-19）
+完整历史见 [CHANGELOG.md](./CHANGELOG.md)。
 
-**修复**
+### v0.2.0 · M0 合并重构（2026-11-21）
 
-- 安装命令改为先下载 /tmp 再 mv 原子替换：直接 `-o` 覆盖正在运行的 Agent 二进制会触发 ETXTBSY 写入保护（表现为 `curl: (23) client returned ERROR on write`），升级重装场景必然失败
+**后端内核重构（并发正确性与安全）**
 
-### v0.1.3 · 安装命令升级兼容（2026-11-19）
+- 全部测试 `go test -race` 通过，含端到端流程（30+ 测试）
+- 首次启动一次性 setup token 初始化管理员（防公网抢注）、登录限速、时序探测防护
+- Agent 默认拒绝明文 `ws://`；token 支持环境变量注入，不出现在进程列表
+- 协议新增 `protocol_version`；重连退避稳定后自动复位；被顶替时明确退出
 
-**修复**
+**自 v0.1.x 并入与保留**
 
-- 面板生成的一键安装命令结尾改为 daemon-reload + enable + restart：原 `enable --now` 对已运行服务不会重启，升级重装时新二进制不生效
+- 发版与镜像流水线（tag → 双架构二进制 + 校验和 + latest/edge 镜像）
+- 仪表盘「版本落后」语义化统计、安装命令（下载原子替换 + 环境文件 + 架构切换）
+- `TARSHIP_JWT_SECRET` 环境变量、scratch + CA 证书镜像（19MB，含 HEALTHCHECK 与 nonroot）
 
-### v0.1.2 · 版本比较修正（2026-11-19）
+**升级注意**
 
-**修复**
+- 管理员账号、服务器与 token 全部保留，数据库直接升级
+- Hub 改为 nonroot 运行：从 v0.1.x 升级需先把数据卷属主改为 65532（一次性）：
 
-- 仪表盘「版本落后」改用语义化版本比较：Agent 版本低于 Hub 才计入；任一方为非 semver（如 dev 开发版）不计入，消除「装了最新版却提示落后」的误报
+```bash
+docker compose down
+docker run --rm -v tarship_tarship-hub-data:/data alpine chown -R 65532:65532 /data
+docker compose pull && docker compose up -d
+```
 
-**变更**
+- JWT 密钥来源变更，升级后需重新登录一次
+- v0.1.x Agent 与 v0.2.0 Hub 协议不兼容：Hub 升级后请对每台服务器重新执行面板生成的安装命令
 
-- 镜像标签策略：`latest` 始终指向最新稳定 Release（tag 构建），main 分支构建改打 `edge` 标签
+### v0.1.4 及更早
 
-### v0.1.1 · 弹窗修复与 CI（2026-11-19）
-
-**修复**
-
-- 修正 Tailwind content 扫描路径：HeroUI v2.8 的组件类名分散在嵌套子包的 `.mjs` chunk 中，原配置扫描的 `@heroui/theme` 路径已不存在，导致 Modal 遮罩层 `fixed/inset-0/z-50` 等 utility 类未生成 CSS、弹窗被排到视口外不可见（表现为点击「添加服务器」无反应）
-
-**新增**
-
-- GitHub Actions CI 质量门禁：前端构建 + go vet + 单测
-- GitHub Actions Docker 自动构建：push main 产出 `latest` + `sha-*` 标签，v* tag 追加版本标签；`docker compose up -d` 可直接拉取最新镜像
-- 发版流水线：tag v* 自动产出 linux amd64/arm64 静态二进制与 sha256 校验和并发布 GitHub Release，面板「添加服务器」生成的安装命令自此可直接下载
-
-### v0.1.0 · M0 骨架（2026-11-18）
-
-**新增**
-
-- 单二进制双角色：`tarship hub` / `tarship agent` 子命令，参数齐全
-- 面板认证：首启初始化向导、bcrypt、JWT HttpOnly Cookie（24h）
-- 服务器管理：添加（一次性 Token + 一键安装命令）、删除、Token 重置
-- Agent 长连接：Bearer Token 认证、hello/heartbeat、30s 心跳、90s 离线判定、指数退避重连（封顶 60s）
-- 面板实时状态：`/ws/panel` 事件广播 + 建连即回执在线快照（panel_hello）
-- React 面板骨架：登录、仪表盘、服务器页、任务/备份库/存储器/设置占位路由
-- 基础设施：纯 Go SQLite（modernc.org/sqlite）+ 版本化迁移、多阶段 Docker 构建（scratch 最终层约 18MB）、docker compose 模板、Makefile、单元测试
+见 [CHANGELOG.md](./CHANGELOG.md)。
 
 ---
 

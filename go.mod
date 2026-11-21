@@ -3,8 +3,8 @@ module github.com/SinGyoZ/TarShip
 go 1.27.4
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/gorilla/websocket v1.5.3
 	golang.org/x/crypto v0.59.0
 	golang.org/x/mod v0.42.0
 	modernc.org/sqlite v1.62.0
