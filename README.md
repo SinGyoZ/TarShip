@@ -95,20 +95,34 @@ docker compose up -d --build
 ### 2. 接入第一台服务器
 
 1. 面板 →「服务器」→「添加服务器」，填写名称
-2. 创建后弹窗展示 **Agent Token（仅此一次）** 与一键安装命令，支持按目标机器架构切换（`amd64`/`arm64`），点击复制
-3. 在目标服务器上以 root 执行单行命令（脚本托管在 GitHub Release，内部完成：下载二进制 → sha256 校验 → 原子替换 → 写入 600 权限的环境文件 → systemd 注册并启动）：
+2. 创建后弹窗展示 **Agent Token（仅此一次）** 与安装命令，支持按目标机器架构切换（`amd64`/`arm64`），点击复制
+3. 在目标服务器上执行——**整块复制、一次粘贴、回车完成**。命令是自包含的一条复合命令（`&&` 串联），内部完成：下载二进制 → sha256 校验 → 原子替换 → 写入 600 权限环境文件 → systemd 注册并启动：
 
 ```bash
-curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/install-agent.sh | sh -s -- --server wss://hub.example.com:8080 --token <TOKEN> --arch amd64
+curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/tarship-linux-amd64 -o /tmp/tarship.new \
+  && curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/checksums.txt -o /tmp/tarship.sha256 \
+  && grep "tarship-linux-amd64" /tmp/tarship.sha256 | awk '{print $1"  tarship.new"}' | (cd /tmp && sha256sum -c -) \
+  && sudo chmod +x /tmp/tarship.new \
+  && sudo mv /tmp/tarship.new /usr/local/bin/tarship \
+  && sudo install -m 600 /dev/null /etc/tarship-agent.env \
+  && printf '%s\n' 'TARSHIP_SERVER=wss://hub.example.com:8080' 'TARSHIP_TOKEN=<TOKEN>' | sudo tee /etc/tarship-agent.env >/dev/null \
+  && printf '%s\n' '[Unit]' 'Description=TarShip Agent' 'After=network-online.target' 'Wants=network-online.target' '' '[Service]' 'EnvironmentFile=/etc/tarship-agent.env' 'ExecStart=/usr/local/bin/tarship agent' 'Restart=always' 'RestartSec=5' '' '[Install]' 'WantedBy=multi-user.target' | sudo tee /etc/systemd/system/tarship-agent.service >/dev/null \
+  && sudo systemctl daemon-reload \
+  && sudo systemctl enable tarship-agent >/dev/null \
+  && sudo systemctl restart tarship-agent \
+  && echo '安装完成'
 ```
 
-卸载（停止服务并删除二进制与配置，**不影响已产生的备份数据**）：
+卸载（同样整块复制执行；**不影响已产生的备份数据**）：
 
 ```bash
-curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/install-agent.sh | sh -s -- --uninstall
+sudo systemctl disable --now tarship-agent 2>/dev/null; \
+  sudo rm -f /etc/systemd/system/tarship-agent.service /etc/tarship-agent.env /usr/local/bin/tarship \
+  && sudo systemctl daemon-reload \
+  && echo '已卸载'
 ```
 
-> 说明：安装与升级重装是同一条命令（覆盖运行中的二进制走 mv 原子替换）；token 会进入 shell history，属一次性安装场景可接受，泄露可随时在面板重置。明文 `ws://` 默认拒绝，本地调试需在命令里加 `--allow-insecure-ws`。
+> 说明：安装与升级重装是同一条命令（覆盖运行中的二进制走 mv 原子替换）；token 会进入 shell history，属一次性安装场景可接受，泄露可随时在面板重置。明文 `ws://` 默认拒绝，面板走 http 时生成的命令已附带调试开关。
 
 4. 回到面板，几秒内该服务器亮起「在线」状态
 
@@ -120,8 +134,9 @@ curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/install-a
 
 ### 登录与初始化
 
-- **首次启动**：面板检测到未初始化时自动进入向导，设置用户名（3-32 字符）与密码（至少 8 位），完成后自动登录。
-- **会话**：JWT 存于 HttpOnly Cookie，24 小时有效；退出登录即失效。
+- **首次启动**：Hub 在日志里发布一次性 setup token（防公网抢注——只有能看到服务器日志的人才能创建管理员）。打开面板把它连同样用户名、密码填入初始化页；用户名 3-32 位字母数字及 `_ . -`，密码 8-72 字节。
+- **会话**：JWT 存于 HttpOnly Cookie（`SameSite=Strict`，HTTPS 下自动加 `Secure`），24 小时有效。
+- **登录限速**：同一 IP 10 分钟内 5 次失败后锁定，成功登录后清零。
 
 ### 服务器管理
 
@@ -314,9 +329,14 @@ chown -R 65532:65532 <数据目录>      # 方式一：调整属主（推荐）
 
 完整历史见 [CHANGELOG.md](./CHANGELOG.md)。
 
+### v0.3.2 · 一键命令改为面板自包含生成（2026-11-26）
+
+- 回退 install-agent.sh 脚本方案：安装命令由面板自包含生成（`&&` 串联的一条复合命令），整块复制、一次粘贴、回车完成；不再依赖外部脚本资产
+- 修正「登录与初始化」旧文案（与 setup token 机制对齐）
+
 ### v0.3.1 · 安装体验与权限指引（2026-11-26）
 
-- Agent 安装收敛为 Release 托管的一键脚本 `install-agent.sh`，面板生成单行命令；卸载命令 `--uninstall` 一并展示（不影响已产生的备份数据）
+- Agent 安装命令与卸载命令同展示于 token 弹窗（不影响已产生的备份数据）
 - Hub 启动时探测数据目录可写性，权限错误直接输出三种修复指引，不再吐 `unable to open database file (14)` 裸错误码
 
 ### v0.3.0 · M1 备份闭环（2026-11-21）

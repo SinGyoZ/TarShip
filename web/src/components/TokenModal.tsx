@@ -34,11 +34,11 @@ export function TokenModal({ issued, reset, onClose }: { issued: ServerWithToken
                 </Button>
               </div>
               <CodeBlock
-                label="在目标服务器上以 root 执行（下载→校验→安装→启动，一键完成；升级重装同命令）"
+                label="在目标服务器上执行（整块复制、一次粘贴、回车完成安装；升级重装同命令）"
                 value={snippet}
               />
               {note ? <p className="text-xs text-warning">{note}</p> : null}
-              <CodeBlock label="卸载命令（停止服务并删除二进制与配置，不影响已有备份）" value={agentUninstallSnippet()} />
+              <CodeBlock label="卸载命令（同样整块复制执行；不影响已有备份数据）" value={agentUninstallSnippet()} />
             </Modal.Body>
             <Modal.Footer>
               <Button onPress={onClose}>我已保存，关闭</Button>

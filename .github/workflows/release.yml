@@ -43,11 +43,9 @@ jobs:
               -ldflags "-s -w -X github.com/SinGyoZ/TarShip/internal/version.Version=${VERSION}" \
               -o "dist/tarship-linux-${ARCH}" ./cmd/tarship
           done
-          # 一键安装/卸载脚本随 Release 发布，面板生成的单行命令引用固定资产名
-          cp scripts/install-agent.sh dist/install-agent.sh
-          chmod +x dist/install-agent.sh
+          # 一键安装/卸载命令由面板生成（自包含复合命令），不需要外部脚本资产
           # 在 dist 目录内生成校验和，行内不带路径前缀，方便安装命令直接 sha256sum -c
-          (cd dist && sha256sum tarship-linux-* install-agent.sh > checksums.txt)
+          (cd dist && sha256sum tarship-linux-* > checksums.txt)
           ls -lh dist/
 
       - name: 创建 Release 并上传资产
@@ -56,6 +54,5 @@ jobs:
           files: |
             dist/tarship-linux-amd64
             dist/tarship-linux-arm64
-            dist/install-agent.sh
             dist/checksums.txt
           generate_release_notes: true
