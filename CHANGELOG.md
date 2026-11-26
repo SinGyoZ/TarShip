@@ -1,5 +1,17 @@
 # 更新记录
 
+## v0.3.1 · 安装体验与权限指引（2026-11-26）
+
+**新增**
+
+- `scripts/install-agent.sh`：Agent 一键安装/卸载脚本，随 Release 发布为固定资产（纳入 checksums）；面板生成的安装命令收敛为单行 `curl | sh`，内部完成下载 → sha256 校验 → 原子替换 → 600 权限环境文件 → systemd 注册与重启；`--uninstall` 停止服务并删除二进制与配置，不触碰已产生的备份数据；明文 `ws://` 默认拒绝，需显式 `--allow-insecure-ws`
+- 面板 token 弹窗同步展示一键安装命令与卸载命令
+
+**修复**
+
+- Hub 启动探测数据目录可写性：权限不足时输出人话修复指引（chown 65532 / 去掉 nonroot / 换可写目录），替代裸 SQLite 错误码（用户实测踩坑 `unable to open database file (14)`）
+- README FAQ 补充权限问题条目与修复命令
+
 ## v0.3.0 · M1 备份闭环（2026-11-21）
 
 **新增**

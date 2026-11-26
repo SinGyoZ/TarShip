@@ -8,3 +8,4 @@ web/dist/*
 !web/dist/.gitkeep
 .temp-e2e/
 web/tsconfig.tsbuildinfo
+.temp-*/

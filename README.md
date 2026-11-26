@@ -96,41 +96,19 @@ docker compose up -d --build
 
 1. 面板 →「服务器」→「添加服务器」，填写名称
 2. 创建后弹窗展示 **Agent Token（仅此一次）** 与一键安装命令，支持按目标机器架构切换（`amd64`/`arm64`），点击复制
-3. 在目标服务器上以 root 执行安装命令（token 写入权限 600 的环境文件，不出现在进程列表）：
+3. 在目标服务器上以 root 执行单行命令（脚本托管在 GitHub Release，内部完成：下载二进制 → sha256 校验 → 原子替换 → 写入 600 权限的环境文件 → systemd 注册并启动）：
 
 ```bash
-# 1. 下载到临时文件，用 Release 校验和验证后原子替换（覆盖运行中的二进制必须走 mv）
-curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/tarship-linux-amd64 -o /tmp/tarship.new \
-  && curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/checksums.txt -o /tmp/tarship.sha256 \
-  && grep "tarship-linux-amd64" /tmp/tarship.sha256 | awk '{print $1"  tarship.new"}' | (cd /tmp && sha256sum -c -) \
-  && chmod +x /tmp/tarship.new \
-  && sudo mv /tmp/tarship.new /usr/local/bin/tarship
-
-# 2. 写入配置文件（权限 600）
-sudo install -m 600 /dev/null /etc/tarship-agent.env
-sudo tee /etc/tarship-agent.env >/dev/null <<'EOF'
-TARSHIP_SERVER=wss://hub.example.com:8080
-TARSHIP_TOKEN=<TOKEN>
-EOF
-
-# 3. 注册为 systemd 服务并启动（安装与升级重装同一套命令）
-sudo tee /etc/systemd/system/tarship-agent.service >/dev/null <<'EOF'
-[Unit]
-Description=TarShip Agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-EnvironmentFile=/etc/tarship-agent.env
-ExecStart=/usr/local/bin/tarship agent
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-sudo systemctl daemon-reload && sudo systemctl enable tarship-agent && sudo systemctl restart tarship-agent
+curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/install-agent.sh | sh -s -- --server wss://hub.example.com:8080 --token <TOKEN> --arch amd64
 ```
+
+卸载（停止服务并删除二进制与配置，**不影响已产生的备份数据**）：
+
+```bash
+curl -fsSL https://github.com/SinGyoZ/TarShip/releases/latest/download/install-agent.sh | sh -s -- --uninstall
+```
+
+> 说明：安装与升级重装是同一条命令（覆盖运行中的二进制走 mv 原子替换）；token 会进入 shell history，属一次性安装场景可接受，泄露可随时在面板重置。明文 `ws://` 默认拒绝，本地调试需在命令里加 `--allow-insecure-ws`。
 
 4. 回到面板，几秒内该服务器亮起「在线」状态
 
@@ -315,6 +293,14 @@ TarShip/
 2. 确认 Token 没被重置过；
 3. 查看 Agent 日志：`journalctl -u tarship-agent -f`（systemd）或 `docker logs -f <容器>`。
 
+**Q：Hub 启动报「数据目录不可写」？**
+容器默认以 UID 65532 运行，挂载目录（尤其宿主机 bind mount 的目录）属主是 root 时无法写入。任选其一修复：
+```bash
+chown -R 65532:65532 <数据目录>      # 方式一：调整属主（推荐）
+# 方式二：compose 里删除 user: "65532:65532" 行，改回 root 运行
+```
+命名卷用户可执行：`docker run --rm -v <项目名>_tarship-hub-data:/data alpine chown -R 65532:65532 /data`
+
 **Q：为什么镜像是 scratch、没有 shell？**
 为了极致体积（约 18MB）与最小攻击面。排障用 `docker logs`；需要进入文件系统可用 `docker export`。Hub 对外提供 `/healthz` 探活端点（无需登录）。
 
@@ -327,6 +313,11 @@ TarShip/
 ## 更新记录
 
 完整历史见 [CHANGELOG.md](./CHANGELOG.md)。
+
+### v0.3.1 · 安装体验与权限指引（2026-11-26）
+
+- Agent 安装收敛为 Release 托管的一键脚本 `install-agent.sh`，面板生成单行命令；卸载命令 `--uninstall` 一并展示（不影响已产生的备份数据）
+- Hub 启动时探测数据目录可写性，权限错误直接输出三种修复指引，不再吐 `unable to open database file (14)` 裸错误码
 
 ### v0.3.0 · M1 备份闭环（2026-11-21）
 

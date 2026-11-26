@@ -29,6 +29,9 @@ func Open(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("创建数据目录 %s 失败（可用 --data 指定其他目录）: %w", dataDir, err)
 	}
+	if err := probeWritable(dataDir); err != nil {
+		return nil, err
+	}
 	abs, err := filepath.Abs(filepath.Join(dataDir, "tarship.db"))
 	if err != nil {
 		return nil, err
@@ -45,13 +48,31 @@ func Open(dataDir string) (*Store, error) {
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("连接数据库失败: %w", err)
+		// 数据库文件所在目录不可写时，Ping 的底层报错是不可读的 SQLite 错误码；
+		// 探针已在上面拦截了绝大多数权限场景，这里再兜底提示一次排查方向。
+		return nil, fmt.Errorf("连接数据库失败: %w（若为全新部署，请检查数据目录 %s 的属主与写权限）", err, dataDir)
 	}
 	if err := migrate(ctx, db); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+// probeWritable 探测数据目录可写性，把权限错误翻译成可执行的修复指引。
+// 容器默认以 UID 65532 运行，宿主目录/卷属主不符时这里能给出准确提示，
+// 而不是把 "unable to open database file (14)" 直接甩给用户。
+func probeWritable(dataDir string) error {
+	f, err := os.CreateTemp(dataDir, ".write-probe-*")
+	if err != nil {
+		return fmt.Errorf("数据目录 %s 不可写（当前进程 UID=%d）: %w\n"+
+			"修复方式（任选其一）:\n"+
+			"  1. 调整目录属主: chown -R 65532:65532 <数据目录>（容器默认以 65532 运行）\n"+
+			"  2. 或在 compose 里删除 user: \"65532:65532\" 行，改回 root 运行\n"+
+			"  3. 或用 --data / TARSHIP_DATA 指定一个可写目录",
+			dataDir, os.Getuid(), err)
+	}
+	return os.Remove(f.Name())
 }
 
 // Close 关闭数据库。
